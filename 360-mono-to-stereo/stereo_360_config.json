@@ -1,0 +1,10 @@
+{
+  "output_dir": "/home/trax/Pictures",
+  "cube_size": 512,
+  "steps": 10,
+  "displacement": 0.2,
+  "ipd": 0.065,
+  "samples": 32,
+  "subdivisions": 5,
+  "heal_seams": true
+}

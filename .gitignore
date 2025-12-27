@@ -1,0 +1,9 @@
+# Python Virtual Environment
+.venv/
+
+# Image Files
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
