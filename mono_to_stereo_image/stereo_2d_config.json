@@ -1,0 +1,9 @@
+{
+  "output_dir": "/home/trax/Pictures",
+  "steps": 10,
+  "displacement": 0.3,
+  "ipd": 0.065,
+  "samples": 32,
+  "subdivisions": 3,
+  "mode": "TOPBOTTOM"
+}

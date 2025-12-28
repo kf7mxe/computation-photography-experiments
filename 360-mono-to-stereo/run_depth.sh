@@ -12,11 +12,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # conda activate marigold
 
 # Option 2: Virtualenv
-source /home/trax/Projects/Trail Run/360-mono-to-stero/.venv/bin/activate
+source /home/trax/Projects/computational-photography/.venv/bin/activate
 
 # Option 3: System Python (if dependencies are installed globally)
 # (no activation needed)
 # ============================================
 
 # Run the depth processor
-python "$SCRIPT_DIR/depth_processor.py" "$@"
+
+/home/trax/Projects/computational-photography/.venv/bin/python "$SCRIPT_DIR/depth_processor.py" "$@"

@@ -2,22 +2,19 @@ import bpy
 import sys
 import os
 import math
+import argparse
 
-# --- CONFIGURATION ---
-STEREO_MODE = 'TOPBOTTOM' 
-DEPTH_STRENGTH = 0.30     
-SAFETY_MARGIN = 1.15      
-BORDER_FADE = 0.05        
-
-def create_stereo_optimized(color_path, depth_path, output_path):
+def create_stereo_optimized(args):
     print(f"--- Starting Optimized Stereo Render ---")
+    
+    color_path = args.input_path
+    depth_path = args.depth_path
+    output_path = args.output_path
     
     scene = bpy.context.scene
     scene.render.engine = 'CYCLES'
     
     # --- MEMORY OPTIMIZATION 1: TILE SIZE ---
-    # Cycles X (Newer Blender) handles this automatically, but for safety:
-    # We let Blender decide tile size to prevent OOM on large renders.
     scene.cycles.use_auto_tile = True
     
     # Setup GPU
@@ -31,7 +28,7 @@ def create_stereo_optimized(color_path, depth_path, output_path):
     except:
         scene.cycles.device = 'CPU'
 
-    scene.cycles.samples = 32
+    scene.cycles.samples = args.samples
     scene.cycles.use_denoising = False
 
     # 2. LOAD IMAGES
@@ -52,8 +49,6 @@ def create_stereo_optimized(color_path, depth_path, output_path):
     print(f" -> Input: {w}x{h} (Aspect: {aspect_ratio:.3f})")
 
     # 3. CREATE OPTIMIZED PLANE
-    # --- MEMORY OPTIMIZATION 2: LOWER BASE RESOLUTION ---
-    # Reduced from 256 to 128. This drastically reduces base memory load.
     bpy.ops.mesh.primitive_grid_add(x_subdivisions=128, y_subdivisions=128, size=1)
     plane = bpy.context.active_object
     plane.rotation_euler = (math.radians(90), 0, 0)
@@ -64,12 +59,8 @@ def create_stereo_optimized(color_path, depth_path, output_path):
     
     bpy.ops.object.shade_smooth()
     
-    # --- MEMORY OPTIMIZATION 3: LOWER SUBDIVISION ---
-    # Level 4 = ~16 Million polys (Crash). 
-    # Level 3 = ~1 Million polys (Fast & Safe).
-    # Depth maps rarely have enough detail to justify Level 4 anyway.
     subsurf = plane.modifiers.new(name="Subsurf", type='SUBSURF')
-    subsurf.render_levels = 3 
+    subsurf.render_levels = args.subdivisions
     subsurf.levels = 1
 
     # 4. MATERIAL (With Edge Pinning)
@@ -103,7 +94,10 @@ def create_stereo_optimized(color_path, depth_path, output_path):
     node_tex_d.image = img_dep
     node_tex_d.extension = 'EXTEND'
 
-    # Math Setup (Same as before)
+    # Constants
+    BORDER_FADE = 0.05 
+
+    # Math Setup
     node_math_x1.operation = 'SUBTRACT'
     node_math_x1.inputs[0].default_value = 1.0
     node_math_x2.operation = 'MINIMUM'
@@ -137,7 +131,7 @@ def create_stereo_optimized(color_path, depth_path, output_path):
     links.new(node_mix_depth.outputs['Color'], node_disp.inputs['Height'])
     links.new(node_disp.outputs['Displacement'], node_out.inputs['Displacement'])
 
-    node_disp.inputs['Scale'].default_value = DEPTH_STRENGTH
+    node_disp.inputs['Scale'].default_value = args.displacement
     node_disp.inputs['Midlevel'].default_value = 0.5
     mat.cycles.displacement_method = 'DISPLACEMENT'
 
@@ -154,12 +148,13 @@ def create_stereo_optimized(color_path, depth_path, output_path):
     cam_data.lens_unit = 'FOV'
     cam_data.angle = math.radians(60) 
 
+    SAFETY_MARGIN = 1.15
     half_width = aspect_ratio / 2.0
     dist = half_width / math.tan(cam_data.angle / 2.0)
     final_dist = dist * SAFETY_MARGIN
     cam_obj.location = (0, -final_dist, 0)
 
-    cam_data.stereo.interocular_distance = 0.065
+    cam_data.stereo.interocular_distance = args.ipd
     cam_data.stereo.convergence_distance = final_dist
 
     # 6. RENDER
@@ -168,7 +163,7 @@ def create_stereo_optimized(color_path, depth_path, output_path):
     scene.render.use_multiview = True
     scene.render.views_format = 'STEREO_3D'
     scene.render.image_settings.views_format = 'STEREO_3D'
-    scene.render.image_settings.stereo_3d_format.display_mode = STEREO_MODE
+    scene.render.image_settings.stereo_3d_format.display_mode = args.mode
     scene.render.image_settings.stereo_3d_format.use_squeezed_frame = True 
     scene.render.image_settings.file_format = 'JPEG'
     scene.render.filepath = output_path
@@ -178,11 +173,28 @@ def create_stereo_optimized(color_path, depth_path, output_path):
     print(" -> Done.")
 
 if __name__ == "__main__":
-    argv = sys.argv
+    # Because Blender is weird with sys.argv, we need to extract args after "--"
+    # usage: blender -b -P script.py -- [args]
+    
+    if "--" in sys.argv:
+        argv = sys.argv[sys.argv.index("--") + 1:]
+    else:
+        argv = []
+
+    parser = argparse.ArgumentParser(description="Render stereo 3D from 2D + Depth.")
+    parser.add_argument("input_path", help="Input color image")
+    parser.add_argument("depth_path", help="Input depth map")
+    parser.add_argument("output_path", help="Output stereo image")
+    
+    parser.add_argument("--displacement", type=float, default=0.3, help="Displacement strength")
+    parser.add_argument("--ipd", type=float, default=0.065, help="Interpupillary Distance")
+    parser.add_argument("--samples", type=int, default=32, help="Render samples")
+    parser.add_argument("--subdivisions", type=int, default=3, help="Subdivision levels")
+    parser.add_argument("--mode", type=str, default='TOPBOTTOM', choices=['TOPBOTTOM', 'SIDEBYSIDE', 'ANAGLYPH'], help="Stereo mode")
+
     try:
-        if "--" in argv:
-            args = argv[argv.index("--") + 1:]
-            if len(args) < 3: raise ValueError("Args missing")
-            create_stereo_optimized(args[0], args[1], args[2])
+        args = parser.parse_args(argv)
+        create_stereo_optimized(args)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error parsing args: {e}")
+        sys.exit(1)

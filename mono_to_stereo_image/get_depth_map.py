@@ -4,11 +4,7 @@ from PIL import Image
 from diffusers import MarigoldDepthPipeline
 import os
 import multiprocessing
-
-# --- CONFIGURATION ---
-INPUT_IMAGE_PATH = "test.jpg"       # Put your normal 2D image here
-OUTPUT_FILENAME = "depth_output.jpg"
-STEPS = 10                           # 10-50 is usually enough for LCM version. 100 for max quality.
+import argparse
 
 def load_depth_model():
     """Loads the official Marigold pipeline."""
@@ -36,25 +32,25 @@ def load_depth_model():
     pipe.to(device)
     return pipe
 
-def process_single_image(image_path):
-    if not os.path.exists(image_path):
-        print(f"Error: Input file '{image_path}' not found.")
+def process_single_image(input_path, output_path, steps):
+    if not os.path.exists(input_path):
+        print(f"Error: Input file '{input_path}' not found.")
         return
 
     # 1. Load Image
-    print(f"Loading image: {image_path}")
-    original_img = Image.open(image_path).convert("RGB")
+    print(f"Loading image: {input_path}")
+    original_img = Image.open(input_path).convert("RGB")
     original_size = original_img.size # (Width, Height)
     
     # 2. Load Model
     pipe = load_depth_model()
     
     # 3. Run Inference
-    print("Running depth estimation...")
+    print(f"Running depth estimation with {steps} steps...")
     with torch.no_grad():
         # processing_resolution=0 means it keeps original resolution or handles it internally
         # You can set processing_resolution=768 to force a size if you run out of RAM
-        results = pipe(original_img, num_inference_steps=STEPS)
+        results = pipe(original_img, num_inference_steps=steps)
     
     depth_pred = results.prediction 
     
@@ -88,8 +84,16 @@ def process_single_image(image_path):
         depth_pil = depth_pil.resize(original_size, Image.BICUBIC)
 
     # 7. Save
-    depth_pil.save(OUTPUT_FILENAME)
-    print(f"Done! Depth map saved to {OUTPUT_FILENAME}")
+    depth_pil.save(output_path)
+    print(f"Done! Depth map saved to {output_path}")
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Generate depth maps from 2D images using Marigold.")
+    parser.add_argument("input_start", help="Input image path")
+    parser.add_argument("output_path", help="Output depth map path")
+    parser.add_argument("--steps", type=int, default=10, help="Inference steps (default: 10)")
+    return parser.parse_args()
 
 if __name__ == "__main__":
-    process_single_image(INPUT_IMAGE_PATH)
+    args = parse_args()
+    process_single_image(args.input_start, args.output_path, args.steps)
