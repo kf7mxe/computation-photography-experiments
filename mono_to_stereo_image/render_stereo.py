@@ -6,7 +6,7 @@ import argparse
 
 def create_stereo_optimized(args):
     print(f"--- Starting Optimized Stereo Render ---")
-    
+
     color_path = args.input_path
     depth_path = args.depth_path
     output_path = args.output_path
@@ -48,20 +48,28 @@ def create_stereo_optimized(args):
     aspect_ratio = w / h
     print(f" -> Input: {w}x{h} (Aspect: {aspect_ratio:.3f})")
 
-    # 3. CREATE OPTIMIZED PLANE
-    bpy.ops.mesh.primitive_grid_add(x_subdivisions=128, y_subdivisions=128, size=1)
+    # 3. CREATE OPTIMIZED PLANE (High resolution for smooth displacement)
+    # Higher base resolution = less warping/smudging on displaced geometry
+    base_res = 384  # Increased from 256 for even smoother results
+    bpy.ops.mesh.primitive_grid_add(x_subdivisions=base_res, y_subdivisions=base_res, size=1)
     plane = bpy.context.active_object
     plane.rotation_euler = (math.radians(90), 0, 0)
-    
-    plane.scale[0] = aspect_ratio 
+
+    plane.scale[0] = aspect_ratio
     plane.scale[1] = 1.0
     bpy.ops.object.transform_apply(scale=True)
-    
+
     bpy.ops.object.shade_smooth()
-    
+
+    # Subdivision modifier for final detail
+    # Lower levels are fine since base mesh is already high-res
     subsurf = plane.modifiers.new(name="Subsurf", type='SUBSURF')
     subsurf.render_levels = args.subdivisions
-    subsurf.levels = 1
+    subsurf.levels = 1  # Viewport level stays low for responsiveness
+
+    # Use adaptive subdivision for better quality on high-detail areas
+    subsurf.subdivision_type = 'CATMULL_CLARK'
+    subsurf.quality = 4  # Higher quality subdivision
 
     # 4. MATERIAL (With Edge Pinning)
     mat = bpy.data.materials.new(name="StereoMat")
@@ -77,25 +85,26 @@ def create_stereo_optimized(args):
     node_tex_c = nodes.new('ShaderNodeTexImage')
     node_tex_d = nodes.new('ShaderNodeTexImage')
     
-    # Edge Pinning logic
+    # Edge Pinning logic - IMPROVED to reduce artifacts on foreground objects
     node_uv = nodes.new('ShaderNodeTexCoord')
     node_xyz = nodes.new('ShaderNodeSeparateXYZ')
     node_math_x1 = nodes.new('ShaderNodeMath')
-    node_math_x2 = nodes.new('ShaderNodeMath') 
-    node_math_y1 = nodes.new('ShaderNodeMath') 
-    node_math_y2 = nodes.new('ShaderNodeMath') 
-    node_math_mult = nodes.new('ShaderNodeMath') 
-    node_math_sharp = nodes.new('ShaderNodeMath') 
-    node_clamp = nodes.new('ShaderNodeMath')      
-    node_mix_depth = nodes.new('ShaderNodeMixRGB') 
+    node_math_x2 = nodes.new('ShaderNodeMath')
+    node_math_y1 = nodes.new('ShaderNodeMath')
+    node_math_y2 = nodes.new('ShaderNodeMath')
+    node_math_mult = nodes.new('ShaderNodeMath')
+    node_math_sharp = nodes.new('ShaderNodeMath')
+    node_clamp = nodes.new('ShaderNodeMath')
+    node_power = nodes.new('ShaderNodeMath')  # NEW: Soften edge transition
+    node_mix_depth = nodes.new('ShaderNodeMixRGB')
 
     node_tex_c.image = img_col
     node_tex_c.extension = 'EXTEND'
     node_tex_d.image = img_dep
     node_tex_d.extension = 'EXTEND'
 
-    # Constants
-    BORDER_FADE = 0.05 
+    # Constants - Reduced border fade for less aggressive pinning
+    BORDER_FADE = 0.02  # Reduced from 0.05 - only pin extreme edges
 
     # Math Setup
     node_math_x1.operation = 'SUBTRACT'
@@ -106,25 +115,28 @@ def create_stereo_optimized(args):
     node_math_y2.operation = 'MINIMUM'
     node_math_mult.operation = 'MULTIPLY'
     node_math_sharp.operation = 'DIVIDE'
-    node_math_sharp.inputs[1].default_value = BORDER_FADE 
+    node_math_sharp.inputs[1].default_value = BORDER_FADE
+    node_power.operation = 'POWER'
+    node_power.inputs[1].default_value = 2.0  # Square the mask for smoother falloff
     node_clamp.operation = 'MINIMUM'
     node_clamp.inputs[1].default_value = 1.0
-    node_mix_depth.inputs[1].default_value = (0.5, 0.5, 0.5, 1.0) 
+    node_mix_depth.inputs[1].default_value = (0.5, 0.5, 0.5, 1.0)
 
-    # Links
+    # Links - Added power node for smoother transition
     links.new(node_uv.outputs['UV'], node_xyz.inputs['Vector'])
-    links.new(node_xyz.outputs['X'], node_math_x1.inputs[1])     
-    links.new(node_xyz.outputs['X'], node_math_x2.inputs[0])    
-    links.new(node_math_x1.outputs['Value'], node_math_x2.inputs[1]) 
-    links.new(node_xyz.outputs['Y'], node_math_y1.inputs[1])     
-    links.new(node_xyz.outputs['Y'], node_math_y2.inputs[0])     
-    links.new(node_math_y1.outputs['Value'], node_math_y2.inputs[1]) 
+    links.new(node_xyz.outputs['X'], node_math_x1.inputs[1])
+    links.new(node_xyz.outputs['X'], node_math_x2.inputs[0])
+    links.new(node_math_x1.outputs['Value'], node_math_x2.inputs[1])
+    links.new(node_xyz.outputs['Y'], node_math_y1.inputs[1])
+    links.new(node_xyz.outputs['Y'], node_math_y2.inputs[0])
+    links.new(node_math_y1.outputs['Value'], node_math_y2.inputs[1])
     links.new(node_math_x2.outputs['Value'], node_math_mult.inputs[0])
     links.new(node_math_y2.outputs['Value'], node_math_mult.inputs[1])
     links.new(node_math_mult.outputs['Value'], node_math_sharp.inputs[0])
-    links.new(node_math_sharp.outputs['Value'], node_clamp.inputs[0])
-    links.new(node_clamp.outputs['Value'], node_mix_depth.inputs['Fac']) 
-    links.new(node_tex_d.outputs['Color'], node_mix_depth.inputs[2]) 
+    links.new(node_math_sharp.outputs['Value'], node_power.inputs[0])  # NEW: Soften with power
+    links.new(node_power.outputs['Value'], node_clamp.inputs[0])
+    links.new(node_clamp.outputs['Value'], node_mix_depth.inputs['Fac'])
+    links.new(node_tex_d.outputs['Color'], node_mix_depth.inputs[2])
 
     links.new(node_tex_c.outputs['Color'], node_emit.inputs['Color'])
     links.new(node_emit.outputs['Emission'], node_out.inputs['Surface'])
@@ -164,12 +176,39 @@ def create_stereo_optimized(args):
     scene.render.views_format = 'STEREO_3D'
     scene.render.image_settings.views_format = 'STEREO_3D'
     scene.render.image_settings.stereo_3d_format.display_mode = args.mode
-    scene.render.image_settings.stereo_3d_format.use_squeezed_frame = True 
-    scene.render.image_settings.file_format = 'JPEG'
-    scene.render.filepath = output_path
+    scene.render.image_settings.stereo_3d_format.use_squeezed_frame = True
+
+    # Use PNG for better stereo compatibility, or set quality for JPEG
+    if output_path.lower().endswith('.jpg') or output_path.lower().endswith('.jpeg'):
+        scene.render.image_settings.file_format = 'JPEG'
+        scene.render.image_settings.quality = 95
+        # Remove extension - Blender adds it
+        filepath = output_path.rsplit('.', 1)[0]
+    elif output_path.lower().endswith('.png'):
+        scene.render.image_settings.file_format = 'PNG'
+        scene.render.image_settings.color_mode = 'RGB'
+        scene.render.image_settings.compression = 15
+        filepath = output_path.rsplit('.', 1)[0]
+    else:
+        filepath = output_path
+        scene.render.image_settings.file_format = 'PNG'
+
+    scene.render.filepath = filepath
 
     print(f" -> Rendering Optimized ({w}x{h})...")
+    print(f" -> Output path: {filepath}")
     bpy.ops.render.render(write_still=True)
+
+    # Verify file was actually saved
+    import glob
+    possible_files = glob.glob(f"{filepath}*")
+    if possible_files:
+        actual_file = possible_files[0]
+        print(f" -> SUCCESS: File saved to: {actual_file}")
+    else:
+        print(f" -> WARNING: Could not find saved file at {filepath}")
+        print(f" -> Check Blender's temp directory or output settings")
+
     print(" -> Done.")
 
 if __name__ == "__main__":
@@ -185,11 +224,11 @@ if __name__ == "__main__":
     parser.add_argument("input_path", help="Input color image")
     parser.add_argument("depth_path", help="Input depth map")
     parser.add_argument("output_path", help="Output stereo image")
-    
-    parser.add_argument("--displacement", type=float, default=0.3, help="Displacement strength")
+
+    parser.add_argument("--displacement", type=float, default=0.2, help="Displacement strength (lower = less warping)")
     parser.add_argument("--ipd", type=float, default=0.065, help="Interpupillary Distance")
     parser.add_argument("--samples", type=int, default=32, help="Render samples")
-    parser.add_argument("--subdivisions", type=int, default=3, help="Subdivision levels")
+    parser.add_argument("--subdivisions", type=int, default=2, help="Subdivision levels (2-3 recommended)")
     parser.add_argument("--mode", type=str, default='TOPBOTTOM', choices=['TOPBOTTOM', 'SIDEBYSIDE', 'ANAGLYPH'], help="Stereo mode")
 
     try:

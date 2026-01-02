@@ -42,28 +42,44 @@ def create_stereo_360(color_path, depth_path, output_path,
     scene = bpy.context.scene
     scene.render.engine = 'CYCLES'
     
-    # Set Device (Try GPU, Fallback to CPU)
+    # Set Device (Try GPU with CUDA/HIP/OptiX, Fallback to CPU)
+    gpu_enabled = False
     try:
         preferences = bpy.context.preferences
         cycles_prefs = preferences.addons['cycles'].preferences
-        cycles_prefs.compute_device_type = 'CUDA'
-        cycles_prefs.get_devices()
-        
-        found_gpu = False
-        for device in cycles_prefs.devices:
-            if device.type != 'CPU':
-                device.use = True
-                found_gpu = True
-        
-        if found_gpu:
-            scene.cycles.device = 'GPU'
-            print_progress("GPU rendering enabled")
-        else:
+
+        # Try different compute device types in order of preference
+        device_types_to_try = ['HIP', 'CUDA', 'OPTIX', 'METAL']
+
+        for compute_type in device_types_to_try:
+            try:
+                cycles_prefs.compute_device_type = compute_type
+                cycles_prefs.get_devices()
+
+                found_gpu = False
+                for device in cycles_prefs.devices:
+                    if device.type != 'CPU':
+                        device.use = True
+                        found_gpu = True
+                        print_progress(f"Found GPU device: {device.name} ({compute_type})")
+
+                if found_gpu:
+                    scene.cycles.device = 'GPU'
+                    print_progress(f"GPU rendering enabled with {compute_type}")
+                    gpu_enabled = True
+                    break
+            except:
+                continue
+
+        if not gpu_enabled:
             scene.cycles.device = 'CPU'
-            print_progress("Using CPU rendering (slower)")
-    except:
+            print_progress("No GPU found, using CPU rendering (slower)")
+            print_progress("For AMD GPUs: Ensure Blender is compiled with HIP/ROCm support")
+            print_progress("For NVIDIA GPUs: Ensure CUDA drivers are installed")
+    except Exception as e:
         scene.cycles.device = 'CPU'
-        print_progress("GPU setup failed, using CPU")
+        print_progress(f"GPU setup failed: {e}")
+        print_progress("Using CPU rendering")
 
     # Render Settings
     scene.cycles.samples = samples
@@ -74,18 +90,26 @@ def create_stereo_360(color_path, depth_path, output_path,
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete()
 
-    # 3. CREATE SPHERE
+    # 3. CREATE SPHERE FOR 360° STEREO
     print_progress("Creating displaced sphere...")
+    # Use radius of 2.0 for better depth perception at comfortable viewing distance
     bpy.ops.mesh.primitive_uv_sphere_add(
-        segments=128, 
-        ring_count=64, 
-        radius=1, 
+        segments=256,  # Increased for smoother 360° viewing
+        ring_count=128,  # Increased for better vertical resolution
+        radius=2.0,  # Larger radius for better stereo separation
         location=(0, 0, 0)
     )
     sphere = bpy.context.active_object
+
+    # Flip normals so we're looking at the inside of the sphere
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.mesh.flip_normals()
+    bpy.ops.object.mode_set(mode='OBJECT')
+
     bpy.ops.object.shade_smooth()
 
-    # Add Subdivision Modifier
+    # Add Subdivision Modifier for smoother displacement
     subsurf = sphere.modifiers.new(name="Subsurf", type='SUBSURF')
     subsurf.render_levels = subdivisions
     subsurf.levels = min(2, subdivisions)
@@ -101,9 +125,9 @@ def create_stereo_360(color_path, depth_path, output_path,
 
     # Create nodes
     node_output = nodes.new(type='ShaderNodeOutputMaterial')
-    node_emission = nodes.new(type='ShaderNodeEmission') 
+    node_emission = nodes.new(type='ShaderNodeEmission')
     node_disp = nodes.new(type='ShaderNodeDisplacement')
-    
+
     # Load Color Image
     try:
         img_col = bpy.data.images.load(color_path)
@@ -127,19 +151,33 @@ def create_stereo_360(color_path, depth_path, output_path,
         print(f"[ERROR] {e}", file=sys.stderr)
         return False
 
+    # Add ColorRamp to control depth mapping
+    node_colorramp = nodes.new(type='ShaderNodeValToRGB')
+    node_colorramp.color_ramp.elements[0].position = 0.0
+    node_colorramp.color_ramp.elements[1].position = 1.0
+
+    # DO NOT INVERT: Brighter depth values = farther away = push inward on sphere interior
+    # Darker depth values = closer = pop out toward viewer
+    # This creates the correct 3D pop-out effect
+    node_colorramp.color_ramp.elements[0].color = (0, 0, 0, 1)  # Black at 0 (close/pop-out)
+    node_colorramp.color_ramp.elements[1].color = (1, 1, 1, 1)  # White at 1 (far/push-in)
+
     # Link nodes
     links.new(node_tex_color.outputs['Color'], node_emission.inputs['Color'])
     links.new(node_emission.outputs['Emission'], node_output.inputs['Surface'])
-    links.new(node_tex_depth.outputs['Color'], node_disp.inputs['Height'])
+    links.new(node_tex_depth.outputs['Color'], node_colorramp.inputs['Fac'])
+    links.new(node_colorramp.outputs['Color'], node_disp.inputs['Height'])
     links.new(node_disp.outputs['Displacement'], node_output.inputs['Displacement'])
 
-    # Displacement settings
-    node_disp.inputs['Scale'].default_value = displacement_scale
+    # Displacement settings - significantly increased for stronger 3D effect
+    # The displacement scale needs to be much larger for visible depth on a radius=2.0 sphere
+    # Using 5x multiplier instead of 2x for dramatic depth perception
+    node_disp.inputs['Scale'].default_value = displacement_scale * 5.0
     node_disp.inputs['Midlevel'].default_value = 0.5
     mat.cycles.displacement_method = 'DISPLACEMENT'
 
-    # 5. SETUP CAMERA
-    print_progress("Configuring stereoscopic camera...")
+    # 5. SETUP CAMERA FOR OMNIDIRECTIONAL STEREO (ODS)
+    print_progress("Configuring omnidirectional stereo camera...")
     cam_data = bpy.data.cameras.new(name='StereoCam')
     cam_obj = bpy.data.objects.new(name='StereoCam', object_data=cam_data)
     scene.collection.objects.link(cam_obj)
@@ -148,9 +186,15 @@ def create_stereo_360(color_path, depth_path, output_path,
     cam_obj.location = (0, 0, 0)
     cam_obj.rotation_euler = (math.radians(90), 0, 0)
 
+    # Use panoramic camera with proper 360 stereo settings
     cam_data.type = 'PANO'
     cam_data.panorama_type = 'EQUIRECTANGULAR'
+
+    # Critical: Use PARALLEL stereo convergence mode for 360° viewing
+    # This creates proper omnidirectional stereo instead of convergent stereo
+    cam_data.stereo.convergence_mode = 'PARALLEL'
     cam_data.stereo.interocular_distance = ipd
+    cam_data.stereo.convergence_distance = 2.0  # Match sphere radius for proper parallax
 
     # 6. RESOLUTION & STEREO SETUP
     w = img_col.size[0]
