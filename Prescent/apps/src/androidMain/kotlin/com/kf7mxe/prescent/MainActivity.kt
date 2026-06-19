@@ -1,0 +1,55 @@
+package com.kf7mxe.prescent
+
+import android.os.Bundle
+import android.util.Log
+import com.lightningkite.kiteui.KiteUiActivity
+import com.lightningkite.kiteui.Throwable_report
+import com.lightningkite.kiteui.models.Theme
+import com.lightningkite.kiteui.navigation.PageNavigator
+import com.lightningkite.kiteui.printStackTrace2
+import com.lightningkite.kiteui.reactive.*
+import com.lightningkite.kiteui.views.*
+import com.lightningkite.kiteui.views.direct.*
+import com.lightningkite.lightningserver.*
+import com.lightningkite.lightningserver.sessions.*
+import com.lightningkite.reactive.context.*
+import com.lightningkite.reactive.core.*
+import com.lightningkite.reactive.extensions.*
+import com.lightningkite.reactive.lensing.*
+import com.lightningkite.readable.*
+import com.lightningkite.services.data.*
+import com.lightningkite.services.database.*
+import com.lightningkite.services.files.*
+import org.opencv.android.OpenCVLoader
+import kotlin.uuid.Uuid
+
+class MainActivity : KiteUiActivity() {
+    companion object {
+        val main = PageNavigator { AutoRoutes }
+        val dialog = PageNavigator { AutoRoutes }
+    }
+
+    override val theme: ReactiveContext.() -> Theme
+        get() = { appTheme() }
+
+    override val mainNavigator: PageNavigator get() = main
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        codeCacheDir.setReadOnly()
+
+        if (OpenCVLoader.initDebug()) {
+            Log.d("OpenCV", "OpenCV loaded successfully")
+        } else {
+            Log.e("OpenCV", "OpenCV initialization failed")
+        }
+
+        Throwable_report = { ex, ctx ->
+            ex.printStackTrace2()
+//            Sentry.captureException(ex)
+        }
+
+        GlobalNavigator.main = main
+        viewWriter.app(main, dialog)
+    }
+}
