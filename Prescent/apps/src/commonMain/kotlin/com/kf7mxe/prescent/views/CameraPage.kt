@@ -24,6 +24,7 @@ class CameraPage : Page, FullscreenPage {
     val shutterTrigger = Signal(0)
     val isHdrMode = Signal(true)
     val cameraLens = Signal(0)
+    val cameraLabels = Signal(listOf(0 to "Back", 1 to "Front"))
 
     // Night Sight
     val isNightSight = Signal(false)
@@ -35,7 +36,14 @@ class CameraPage : Page, FullscreenPage {
     val focusStackFrameCount = Signal(6)
     val focusStackCaptureTrigger = Signal(0)
 
-    // Capture mode: "hdr", "single", "night", "focus"
+    // Spatial / 3D
+    val isSpatial = Signal(false)
+    val spatialCaptureTrigger = Signal(0)
+
+    // Photo Sphere (accumulates single shots)
+    val sphereFrames = Signal<List<String>>(listOf())
+
+    // Capture mode: "hdr", "single", "night", "focus", "spatial", "sphere"
     val captureMode = Signal("hdr")
 
     override fun ElementWriter.CanAddTheme.render() {
@@ -57,10 +65,9 @@ class CameraPage : Page, FullscreenPage {
 
             // ── Capture Mode Selector ─────────────────────────────────────
             padded.row {
-                listOf("hdr" to "HDR", "single" to "Photo", "night" to "Night", "focus" to "Focus").forEach { (mode, label) ->
+                listOf("hdr" to "HDR", "single" to "Photo", "night" to "Night", "focus" to "Focus", "spatial" to "Spatial", "sphere" to "Sphere").forEach { (mode, label) ->
                     expanding.toggleButton {
-                        text(label)
-                        checked bind captureMode.equalTo(mode)
+                        text(label); checked bind captureMode.equalTo(mode)
                     }
                 }
             }
@@ -68,10 +75,19 @@ class CameraPage : Page, FullscreenPage {
             // Sync captureMode → individual signals
             reactive {
                 when (captureMode()) {
-                    "hdr" -> { isHdrMode.value = true; isNightSight.value = false; isFocusStacking.value = false }
-                    "single" -> { isHdrMode.value = false; isNightSight.value = false; isFocusStacking.value = false }
-                    "night" -> { isHdrMode.value = false; isNightSight.value = true; isFocusStacking.value = false }
-                    "focus" -> { isHdrMode.value = false; isNightSight.value = false; isFocusStacking.value = true }
+                    "hdr" -> { isHdrMode.value = true; isNightSight.value = false; isFocusStacking.value = false; isSpatial.value = false }
+                    "single" -> { isHdrMode.value = false; isNightSight.value = false; isFocusStacking.value = false; isSpatial.value = false }
+                    "night" -> { isHdrMode.value = false; isNightSight.value = true; isFocusStacking.value = false; isSpatial.value = false }
+                    "focus" -> { isHdrMode.value = false; isNightSight.value = false; isFocusStacking.value = true; isSpatial.value = false }
+                    "spatial" -> { isHdrMode.value = false; isNightSight.value = false; isFocusStacking.value = false; isSpatial.value = true }
+                    "sphere" -> { isHdrMode.value = false; isNightSight.value = false; isFocusStacking.value = false; isSpatial.value = false }
+                }
+            }
+
+            // Reset sphere frames when leaving sphere mode
+            reactive {
+                if (captureMode() != "sphere" && sphereFrames().isNotEmpty()) {
+                    sphereFrames.value = listOf()
                 }
             }
 
@@ -80,8 +96,11 @@ class CameraPage : Page, FullscreenPage {
                 cameraView(
                     shutterTrigger = shutterTrigger,
                     onImagesCaptured = { paths ->
-                        if (isHdrMode.value && paths.size > 1) {
-                            GlobalNavigator.main.navigate(HdrProcessingPage(paths))
+                        when {
+                            isHdrMode.value && paths.size > 1 -> GlobalNavigator.main.navigate(HdrProcessingPage(paths))
+                            captureMode.value == "sphere" && paths.isNotEmpty() -> {
+                                sphereFrames.value = sphereFrames.value + paths
+                            }
                         }
                     },
                     bracketCount = bracketCount,
@@ -99,6 +118,14 @@ class CameraPage : Page, FullscreenPage {
                     focusStackCaptureTrigger = focusStackCaptureTrigger,
                     onFocusStackCaptured = { frames ->
                         GlobalNavigator.main.navigate(FocusStackPage(frames))
+                    },
+                    isSpatial = isSpatial,
+                    spatialCaptureTrigger = spatialCaptureTrigger,
+                    onSpatialCaptured = { frames ->
+                        GlobalNavigator.main.navigate(SpatialPage(frames))
+                    },
+                    onCameraLabels = { labels ->
+                        cameraLabels.value = labels.mapIndexed { idx, l -> idx to l }
                     }
                 )
 
@@ -118,6 +145,18 @@ class CameraPage : Page, FullscreenPage {
                 shownWhen { isFocusStacking() }.frame {
                     atTopEnd.card.padded.col {
                         text { ::content { "${focusStackFrameCount()} focus steps" } }
+                    }
+                }
+
+                shownWhen { isSpatial() }.frame {
+                    atTopEnd.card.padded.col {
+                        text("Stereo pair")
+                    }
+                }
+
+                shownWhen { captureMode() == "sphere" }.frame {
+                    atTopEnd.card.padded.col {
+                        text { ::content { "${sphereFrames().size} captured" } }
                     }
                 }
             }
@@ -145,6 +184,7 @@ class CameraPage : Page, FullscreenPage {
                         when {
                             isNightSight.value -> nightSightCaptureTrigger.value += 1
                             isFocusStacking.value -> focusStackCaptureTrigger.value += 1
+                            isSpatial.value -> spatialCaptureTrigger.value += 1
                             else -> shutterTrigger.value += 1
                         }
                     }
@@ -156,10 +196,20 @@ class CameraPage : Page, FullscreenPage {
                 }
             }
 
+            // ── Sphere: Stitch All button when frames accumulated ────────
+            shownWhen { captureMode() == "sphere" && sphereFrames().size >= 2 }.frame {
+                padded.important.button {
+                    text { ::content { "Stitch ${sphereFrames().size} frames" } }
+                    onClick {
+                        GlobalNavigator.main.navigate(PhotoSpherePage(sphereFrames.value))
+                    }
+                }
+            }
+
             // ── Lens Selector ─────────────────────────────────────────────
             padded.row {
                 text("Lens:")
-                listOf("Back" to 0, "Front" to 1).forEach { (label, idx) ->
+                forEach(cameraLabels) { (idx, label) ->
                     toggleButton {
                         text(label); checked bind cameraLens.equalTo(idx)
                     }

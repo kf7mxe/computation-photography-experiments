@@ -25,6 +25,8 @@ Focus Stacking, Photo Sphere, 3D Spatial) and eventual DSLR tethering on Desktop
 | **Settings** | App-wide preferences (camera selection, defaults, theme) | ✅ Done |
 | **Night Sight** | Multi-frame low-light stacking with star trail mode | ✅ Done |
 | **Focus Stack** | Multi-focus capture with Laplacian sharpness blending | ✅ Done |
+| **Spatial / 3D** | Stereo pair capture with depth map and anaglyph | ✅ Done |
+| **Photo Sphere** | Multi-shot panorama stitching | ✅ Done |
 
 ---
 
@@ -182,18 +184,24 @@ Algorithms to include:
 - [ ] Real-time sharpness preview during capture
 
 ### Spatial / 3D Images (dual-lens devices)
-- [ ] Detect when device has wide + normal (or tele) lens
-- [ ] Capture synchronized stereo pair
-- [ ] Generate depth map from disparity
-- [ ] Output stereo / 3D image (MPO format or side-by-side JPEG)
+- [x] Dual-shot capture (sequential, 300ms delay)
+- [x] Feature matching for rectification (ORB + RANSAC homography)
+- [x] Depth map generation via StereoSGBM disparity
+- [x] Side-by-side output JPEG
+- [x] Red-Cyan anaglyph output
+- [ ] Simultaneous capture from two lenses (currently sequential)
+- [ ] MPO format output
 - [ ] 3D Photo Sphere mode (fuse wide + normal into immersive sphere)
 
 ### Photo Sphere
-- [ ] Gyroscope-guided capture UI (overlay shows coverage progress)
-- [ ] Feature-matching stitch pipeline (SIFT/ORB + RANSAC homography)
+- [x] Multi-shot capture mode (accumulates frames in CameraPage)
+- [x] Feature-matching stitch pipeline (ORB + RANSAC homography)
+- [x] Auto-crop black borders after stitching (row/column scan)
+- [x] Preview and export stitched panorama
+- [ ] Gyroscope-guided capture overlay
 - [ ] Equirectangular projection output
-- [ ] Preview inside sphere viewer
-- [ ] Export as standard Photo Sphere JPEG with XMP metadata
+- [ ] XMP Photo Sphere metadata
+- [ ] In-app sphere viewer
 
 ---
 

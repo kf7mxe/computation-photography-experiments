@@ -10,12 +10,16 @@ expect fun ElementWriter.cameraView(
     evOffset: Signal<Float>,
     isHdrMode: Signal<Boolean>,
     cameraLens: Signal<Int>,
-    isNightSight: Signal<Boolean>,
-    nightSightFrameCount: Signal<Int>,
-    nightSightCaptureTrigger: Signal<Int>,
-    onNightSightCaptured: ((List<String>) -> Unit)?,
+    onCameraLabels: ((List<String>) -> Unit)? = null,
+    isNightSight: Signal<Boolean> = Signal(false),
+    nightSightFrameCount: Signal<Int> = Signal(8),
+    nightSightCaptureTrigger: Signal<Int> = Signal(0),
+    onNightSightCaptured: ((List<String>) -> Unit)? = null,
     isFocusStacking: Signal<Boolean> = Signal(false),
     focusStackFrameCount: Signal<Int> = Signal(6),
     focusStackCaptureTrigger: Signal<Int> = Signal(0),
-    onFocusStackCaptured: ((List<String>) -> Unit)? = null
+    onFocusStackCaptured: ((List<String>) -> Unit)? = null,
+    isSpatial: Signal<Boolean> = Signal(false),
+    spatialCaptureTrigger: Signal<Int> = Signal(0),
+    onSpatialCaptured: ((List<String>) -> Unit)? = null
 )

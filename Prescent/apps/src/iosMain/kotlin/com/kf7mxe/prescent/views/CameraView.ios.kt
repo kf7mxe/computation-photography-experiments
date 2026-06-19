@@ -11,6 +11,7 @@ actual fun ElementWriter.cameraView(
     evOffset: Signal<Float>,
     isHdrMode: Signal<Boolean>,
     cameraLens: Signal<Int>,
+    onCameraLabels: ((List<String>) -> Unit)?,
     isNightSight: Signal<Boolean>,
     nightSightFrameCount: Signal<Int>,
     nightSightCaptureTrigger: Signal<Int>,
@@ -18,7 +19,10 @@ actual fun ElementWriter.cameraView(
     isFocusStacking: Signal<Boolean>,
     focusStackFrameCount: Signal<Int>,
     focusStackCaptureTrigger: Signal<Int>,
-    onFocusStackCaptured: ((List<String>) -> Unit)?
+    onFocusStackCaptured: ((List<String>) -> Unit)?,
+    isSpatial: Signal<Boolean>,
+    spatialCaptureTrigger: Signal<Int>,
+    onSpatialCaptured: ((List<String>) -> Unit)?
 ) {
     text("Camera View (iOS — coming soon)")
 }

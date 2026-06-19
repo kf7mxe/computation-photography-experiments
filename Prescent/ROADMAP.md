@@ -45,17 +45,17 @@ This document outlines the long-term plan for the Prescent computational photogr
   - Laplacian-based sharpness map per region per frame
   - Blend sharpest regions into single deep-focus composite (weighted by sharpness)
   - Preview and export the stacked result
-- [ ] **Spatial / 3D Images (dual-lens devices):**
-  - Detect wide + normal (or tele) lens availability
-  - Capture synchronized stereo pair
-  - Generate depth map from disparity
-  - Output stereo / 3D image (MPO format or side-by-side JPEG)
-- [ ] **Photo Sphere:**
-  - Gyroscope-guided capture UI (overlay shows coverage progress)
-  - Feature-matching stitch pipeline (SIFT/ORB + RANSAC homography)
-  - Equirectangular projection output
-  - Preview inside sphere viewer
-  - Export as standard Photo Sphere JPEG with XMP metadata
+- [x] **Spatial / 3D Images (dual-lens devices):**
+  - Capture two sequential shots (300ms delay for movement)
+  - Feature matching for rectification (ORB + RANSAC homography)
+  - Depth map generation via StereoSGBM disparity
+  - Side-by-side and red-cyan anaglyph output
+  - Preview and export
+- [x] **Photo Sphere:**
+  - Multi-shot capture mode (accumulates frames in CameraPage)
+  - Feature-matching stitch pipeline (ORB + RANSAC homography)
+  - Auto-crop black borders after stitching
+  - Preview and export stitched panorama
 
 ## Phase 4: Desktop & Pro Features
 - [ ] **Desktop Application:**

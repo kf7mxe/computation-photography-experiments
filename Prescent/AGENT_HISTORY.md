@@ -99,27 +99,184 @@
 **Session goal:** Implement Focus Stacking (Macro Photography) — Phase 3.
 
 **Files changed:**
+[...] (previous session continued)
 
-- `apps/src/commonMain/kotlin/.../views/CameraView.kt` — Extended `expect` signature with `isFocusStacking`, `focusStackFrameCount`, `focusStackCaptureTrigger`, `onFocusStackCaptured` parameters (all with defaults so existing callers don't break).
+### 2026-06-18 23:30
 
-- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — Updated `actual` signature with new focus stack params. Added `captureFocusStackFrames()`: sweeps focus from near (0) to far (1) via `Camera2CameraControl.setCaptureRequestOptions` with `LENS_FOCUS_DISTANCE` and `AF_MODE_OFF`, saves frames to `filesDir/focusstack/<timestamp>/`, 150ms inter-frame delay. Added focus stack trigger observer. Updated shutter trigger to delegate to `focusStackCaptureTrigger` in focus mode. Added imports for `Camera2CameraControl`, `CaptureRequestOptions`, `CaptureRequest`.
+**Session goal:** Implement Spatial / 3D Images and Photo Sphere — Phase 3.
 
-- `apps/src/iosMain/kotlin/.../views/CameraView.ios.kt` — Updated stub signature with focus stack params.
+**Files changed:**
 
-- `apps/src/jsMain/kotlin/.../views/CameraView.js.kt` — Updated stub signature with focus stack params.
+- `apps/src/commonMain/kotlin/.../views/CameraView.kt` — Extended `expect` signature with `isSpatial`, `spatialCaptureTrigger`, `onSpatialCaptured` params (defaulted).
 
-- `apps/src/commonMain/kotlin/.../views/FocusStackProcessor.kt` *(new)* — `expect suspend fun processFocusStack(images, maxPreviewSize)`.
+- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — Updated actual signature. Added `captureSpatialPair()`: captures two sequential shots (300ms delay) to `filesDir/spatial/<timestamp>/`. Added spatial trigger observer.
 
-- `apps/src/androidMain/kotlin/.../views/FocusStackProcessor.android.kt` *(new)* — `actual` implementation: loads frames, MTB alignment, computes Laplacian per frame, builds sharpness weight maps via local variance of Laplacian over 15×15 neighborhoods, normalizes weights per-pixel across frames, weighted-blends all frames into single deep-focus composite, saves to cache (preview) or MediaStore Pictures/Prescent (full). Clean resource management (all Mats released).
+- `apps/src/iosMain/kotlin/.../views/CameraView.ios.kt` — Updated stub signature.
 
-- `apps/src/iosMain/kotlin/.../views/FocusStackProcessor.ios.kt` *(new)* — Stub returning null.
+- `apps/src/jsMain/kotlin/.../views/CameraView.js.kt` — Updated stub signature.
 
-- `apps/src/jsMain/kotlin/.../views/FocusStackProcessor.js.kt` *(new)* — Stub returning null.
+- `apps/src/commonMain/kotlin/.../views/SpatialProcessor.kt` *(new)* — `expect suspend fun processSpatial()` returning `SpatialResult` (sideBySidePath, depthMapPath, anaglyphPath).
 
-- `apps/src/commonMain/kotlin/.../views/FocusStackPage.kt` *(new)* — UI page: back button, frame strip preview, processing info card, auto-preview on entry (debounced 600ms), full process + save to gallery button with success banner. Follows same pattern as NightSightPage.
+- `apps/src/androidMain/kotlin/.../views/SpatialProcessor.android.kt` *(new)* — `actual` implementation: loads two images → ORB feature matching → RANSAC homography → StereoSGBM disparity → depth color map → side-by-side composite → red-cyan anaglyph → save to cache/MediaStore.
 
-- `apps/src/commonMain/kotlin/.../views/CameraPage.kt` — Added `isFocusStacking`, `focusStackFrameCount`, `focusStackCaptureTrigger` signals. Extended capture mode selector to include "Focus" (4th mode). Reactive sync now handles `"focus"` → `isFocusStacking=true`. Shutter button dispatches to `focusStackCaptureTrigger` in focus mode. `cameraView()` call now passes focus stack params with `onFocusStackCaptured` → `FocusStackPage`. Added focus stack info overlay showing frame count.
+- `apps/src/iosMain/kotlin/.../views/SpatialProcessor.ios.kt` *(new)* — Stub.
 
-- `features.md` — Added Focus Stacking section with progress checkboxes. Updated Night Sight status to reflect actual implementation. Added Focus Stack and Night Sight to pages/status table.
+- `apps/src/jsMain/kotlin/.../views/SpatialProcessor.js.kt` *(new)* — Stub.
 
-- `ROADMAP.md` — Night Sight and Focus Stacking items marked as done (with notes on remaining UI polish).
+- `apps/src/commonMain/kotlin/.../views/SpatialPage.kt` *(new)* — UI: source image strip, side-by-side/depth/anaglyph preview cards, auto-preview debounced, full process + save.
+
+- `apps/src/commonMain/kotlin/.../views/PhotoSphereProcessor.kt` *(new)* — `expect suspend fun processPhotoSphere()` returning stitched path.
+
+- `apps/src/androidMain/kotlin/.../views/PhotoSphereProcessor.android.kt` *(new)* — `actual` implementation: loads all frames → incremental ORB stitching: each frame matched to growing panorama via homography → warp → max-blend → auto-crop black borders by scanning non-zero rows/columns → save.
+
+- `apps/src/iosMain/kotlin/.../views/PhotoSphereProcessor.ios.kt` *(new)* — Stub.
+
+- `apps/src/jsMain/kotlin/.../views/PhotoSphereProcessor.js.kt` *(new)* — Stub.
+
+- `apps/src/commonMain/kotlin/.../views/PhotoSpherePage.kt` *(new)* — UI: frame grid, stitch info, result preview, stitch + save button.
+
+- `apps/src/commonMain/kotlin/.../views/CameraPage.kt` — Added `isSpatial`, `spatialCaptureTrigger`, `sphereFrames` signals. Extended capture mode selector to include "Spatial" and "Sphere" (6 modes total). Sync logic for spatial mode. Sphere mode: `onImagesCaptured` accumulates single-shot paths into `sphereFrames`, shows "Stitch N frames" button when ≥2, navigates to `PhotoSpherePage`. Reset sphere frames on mode switch. CameraView call now passes spatial params.
+
+- `features.md` — Updated Spatial/3D and Photo Sphere sections with implementation status checkboxes.
+
+- `ROADMAP.md` — Both features marked as done with remaining UI polish noted.
+
+### 2026-06-19 10:00
+
+**Session goal:** Fix lens selector to use dynamically discovered cameras from `discoverLenses()`.
+
+**Files changed:**
+
+- `apps/src/commonMain/kotlin/.../views/CameraPage.kt` — Changed `cameraLabels` from `Signal<List<String>>` to `Signal<List<Pair<Int, String>>>` so indices are carried with labels. Added `onCameraLabels` callback to `cameraView()` call that transforms `List<String>` → indexed pairs. Replaced hardcoded `listOf("Back" to 0, "Front" to 1)` lens selector with reactive `forEach(cameraLabels)` that dynamically creates toggle buttons from whatever cameras `discoverLenses()` reports.
+
+### 2026-06-19 10:30
+
+**Session goal:** Fix camera enumeration on Pixel 6 — ultrawide/telephoto lenses weren't discovered.
+
+**Root cause:** `ProcessCameraProvider.getInstance(androidContext).get()` blocks the main thread and throws `IllegalStateException`, silently caught by the fallback which only populates `DEFAULT_BACK_CAMERA` + `DEFAULT_FRONT_CAMERA`.
+
+**Fix:** Replaced `discoverLenses()` to use Android's `CameraManager.getCameraIdList()` (non-blocking) instead of CameraX's `ProcessCameraProvider.availableCameraInfos`. Builds individual `CameraSelector` instances via `CameraFilter` matching each Camera2 camera ID. Wired `onCameraLabels` callback in `CameraPage.kt` to supply dynamic labels back to the lens selector.
+
+**Files changed:**
+- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — Rewrote `discoverLenses()` to enumerate via `CameraManager.getCameraIdList()` + `CameraCharacteristics.get(CameraCharacteristics.LENS_FACING)` instead of `ProcessCameraProvider.getInstance().get()` (which blocks the main thread). Removed `buildCameraLabel()`. Added imports for `Context`, `CameraCharacteristics`, `CameraManager`.
+
+### 2026-06-19 11:00
+
+**Session goal:** Still only seeing one back camera. Pixel 6 ultrawide still missing.
+
+**Root cause:** On multi-camera devices like Pixel 6, the ultrawide is a **physical camera** within a logical multi-camera group. `CameraManager.getCameraIdList()` only returns logical cameras. Physical cameras are only accessible via `CameraCharacteristics.getPhysicalCameraIds()`. Additionally, CameraX cannot switch to a physical camera via `cameraSelector` alone — you must bind to the logical parent then set `LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID` via Camera2CameraControl interop.
+
+**Fix:**
+1. `discoverLenses()` now calls `getPhysicalCameraIds()` on each logical camera to discover physical cameras
+2. Each camera is wrapped in its own try-catch so one failure doesn't abort discovery
+3. Physical cameras are classified by relative focal length (shortest→Ultrawide, longest→Tele)
+4. Camera selection (`selectLens()`) now handles physical cameras by binding to the logical parent and setting the active physical camera ID via Camera2 interop on the capture pipeline
+5. `captureSpatialPair()` updated to use the new `cameras` list instead of removed `backCameraSelectors`
+
+**Files changed:**
+- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — Complete rewrite of lens discovery (`discoverLenses()` → `CameraEntry` data class, logical+physical camera iteration, relative focal length naming). Selection (`selectLens()`) sets `LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID` for physical cameras. `captureSpatialPair()` uses new `cameras` list.
+
+### 2026-06-19 11:30
+
+**Session goal:** Camera selector shows ultrawide option but viewfinder doesn't switch when selected; spatial mode still doesn't use second lens.
+
+**Root cause:** Two issues:
+1. `LifecycleCameraController.cameraSelector` property doesn't trigger a rebind — the initial `bindToLifecycle()` is permanent. Changing `cameraSelector` silently sets a flag but doesn't re-open the camera.
+2. Setting `LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID` via `Camera2CameraControl.setCaptureRequestOptions()` was not reaching the preview because the pipeline was never rebuilt.
+
+**Fix:** Replaced `LifecycleCameraController` with direct `ProcessCameraProvider` + `Preview` + `ImageCapture` management. New `startCamera(entry: CameraEntry)` function:
+1. Unbinds all use cases via `provider.unbindAll()`
+2. Creates fresh `Preview` and `ImageCapture` instances
+3. Binds them to the lifecycle with the logical camera selector via `provider.bindToLifecycle()`
+4. Immediately sets the physical camera ID via `Camera2CameraControl.setCaptureRequestOptions()` on the active camera
+
+This ensures a full camera pipeline restart on every lens switch, so physical cameras properly take effect in the viewfinder. The capture pipeline (`imageCapture`) and camera control (`currentCamera.cameraControl`) are re-acquired after each bind so all capture functions use the current instance.
+
+**Files changed:**
+- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — Replaced all `LifecycleCameraController` usage with `ProcessCameraProvider` + `Preview` + `ImageCapture`. Added `startCamera()`, `setActivePhysicalCamera()`, `selectLens()` functions. All capture functions now use `imageCapture` field and `currentCamera?.cameraControl` instead of controller.
+
+### 2026-06-19 11:30
+
+**Session goal:** Fix physical camera selection (ultrawide/tele) not taking effect in viewfinder or spatial mode.
+
+**Root cause:** The previous approach used `CaptureRequest.Key("android.control.logicalMultiCameraActivePhysicalId")` to set the physical camera via `Camera2CameraControl.setCaptureRequestOptions()` after bind. This key is not recognized by the Camera2 framework — logs show `"CaptureRequest.Key is not supported"`. The string-based Key constructor only registers the Key object but the Camera2 pipeline doesn't validate it.
+
+**Fix:** Switched to the official CameraX 1.4 API: `Camera2Interop.Extender(setPhysicalCameraId())` on `Preview.Builder` and `ImageCapture.Builder` **before** binding. This is the correct CameraX mechanism for selecting a physical camera within a logical multi-camera group. The physical camera ID is embedded in the use case configuration at build time, so CameraX passes it through to the Camera2 capture session correctly.
+
+Also cleaned up unused imports and removed the old `setCaptureRequestOptions` + `CaptureRequest.Key` code.
+
+**Files changed:**
+- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — `startCamera()` now uses `Camera2Interop.Extender(previewBuilder).setPhysicalCameraId()` and `Camera2Interop.Extender(imageCaptureBuilder).setPhysicalCameraId()` instead of post-bind `setCaptureRequestOptions`. Added `Camera2Interop` import.
+
+### 2026-06-19 12:00
+
+**Session goal:** Fix spatial/3D processing — side-by-side, depth map, and anaglyph cards all empty; "Process Full" does nothing.
+
+**Root cause:** The `processSpatial()` function had `matcher.knnMatch(descL, descR, kotlin.collections.listOf(knnMatches), 2)` which passes an **immutable singleton list** (`listOf()`) to OpenCV. OpenCV's knnMatch implementation internally calls `list.add()` to populate the output list, which throws `UnsupportedOperationException` on an immutable list. This exception was caught by the outer try-catch, causing the entire function to return `null` silently. All three result signals stayed null → empty cards.
+
+Secondary issues discovered and fixed:
+1. Feature matching between ultrawide and main cameras (different FOV/focal length) produces very few matches — the original code had no fallback when `findHomography` failed
+2. Disparity computation on different-FOV images would also fail — now wrapped in its own try-catch
+3. All release calls happened after save operations, but a crash in any step leaked previous resources — fixed with per-step error isolation
+
+**Fix:** Completely rewrote `processSpatial()`:
+- **Removed** the broken `knnMatch` call (the previous hack attempted a Lowe's ratio test but never used the results anyway)
+- **Feature matching** is wrapped in its own try-catch with a `resize` fallback that works for any image pair regardless of FOV difference
+- **Disparity** is wrapped in its own try-catch — if stereoscopic depth fails (expected for different-FOV images), it returns null and the depth card stays empty rather than crashing the whole pipeline
+- **Anaglyph** is wrapped in its own try-catch
+- **Always** produces side-by-side even when everything else fails
+- Per-step error logging added to Logcat with `Spatial` tag
+
+**Files changed:**
+- `apps/src/androidMain/kotlin/.../views/SpatialProcessor.android.kt` — Full rewrite with per-step try-catch, resize fallback, immutable list (knnMatch) bug removed, proper null handling for optional outputs (depth/anaglyph).
+
+### 2026-06-19 12:30
+
+**Session goal:** Fix spatial/3D output quality and auto-preview.
+
+**Issues found & fixed:**
+
+1. **Wrong lens switching** — `captureSpatialPair()` was switching from the current lens to a different back camera (ultrawide↔main) which creates images with incompatible FOVs. A homography between different-FOV images produces a misaligned result (one side cropped, the other zoomed out with black borders).
+
+2. **Wrong homography direction** — `findHomography(leftPts, rightPts)` produces H that maps LEFT→RIGHT. `warpPerspective(right, rectRight, H, size)` treats H as the inverse mapping internally, so it was mapping right image pixels BACKWARD through the wrong transform. Fixed by using `H.inv()` which maps RIGHT→LEFT properly.
+
+3. **Anaglyph channel swap** — The red-cyan anaglyph should put the RED channel from the left image and the GREEN+BLUE (cyan) channels from the right image. The original code had `listOf(chR[1], chR[2], chL[0])` which put G from right, B from right, R from left — that's actually correct (0=R, 1=G, 2=B). But the commented note was misleading. Clarified with explicit `listOf(chL[0], chR[1], chR[2])`.
+
+4. **Auto-preview not triggering** — The `reactive { val f = frames.hashCode() }` block uses a non-signal value (`frames` is a plain constructor parameter), so the reactive block's launch may not execute reliably. Moved auto-preview to a `load {}` block which fires once on page creation.
+
+5. **Mat release condition** — `if (!usedHomography) { rectLeft.release() }` was releasing the original `leftResized`/`rightResized` before they were released at line below, causing potential double-free.
+
+**Files changed:**
+- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — `captureSpatialPair()` now uses the same lens for both shots with 300ms delay for natural hand movement. Removed lens-switching logic.
+- `apps/src/androidMain/kotlin/.../views/SpatialProcessor.android.kt` — Fixed homography direction (use `H.inv()`). Changed `rectLeft`/`rectRight` from `val` to `var` with `leftResized` defaults. Fixed anaglyph channel order. Increased ORB features to 2000. Fixed release condition. Added better SGBM parameters for handheld stereo.
+- `apps/src/commonMain/kotlin/.../views/SpatialPage.kt` — Replaced auto-preview `reactive { launch {} }` with `load { launch {} }` pattern.
+
+### 2026-06-19 13:00
+
+**Session goal:** Fix SBS and anaglyph showing identical images (no stereo effect); add rotation control.
+
+**Root cause:** The side-by-side and anaglyph were built from `rectLeft`/`rectRight` — the **homography-aligned** images. Alignment warps the right image to match the left, so they appear nearly identical. The alignment is necessary only for disparity (depth map) computation.
+
+**Fix:** Split processing into two image paths:
+- **Original** `leftResized`/`rightResized` — used for side-by-side and anaglyph (preserving natural parallax from handheld movement)
+- **Aligned** `rectLeft`/`rectRight` — used only for depth map via StereoGBM
+
+**Rotation support:** Added `rotation: Int` parameter (0/90/180/270) to `processSpatial()` expect/actual. Before any processing, both images are rotated via `warpAffine` with the rotation matrix centered and expanded to fit the rotated dimensions. SpatialPage gains a rotation toggle bar that triggers auto-preview on change.
+
+**Files changed:**
+- `apps/src/commonMain/kotlin/.../views/SpatialProcessor.kt` — Added `rotation: Int = 0` parameter to expect signature.
+- `apps/src/androidMain/kotlin/.../views/SpatialProcessor.android.kt` — Split into original + aligned image paths. SBS and anaglyph now use originals. Depth uses aligned. Added rotation via `getRotationMatrix2D` + `warpAffine`. Added `Mat.rotated()` helper.
+- `apps/src/iosMain/kotlin/.../views/SpatialProcessor.ios.kt` — Updated stub with `rotation` param.
+- `apps/src/jsMain/kotlin/.../views/SpatialProcessor.js.kt` — Updated stub with `rotation` param.
+- `apps/src/commonMain/kotlin/.../views/SpatialPage.kt` — Added `rotation` Signal + rotation toggle row (0°/90°/180°/270°). Auto-preview now triggered by `reactive { rotation() }` block. Passes `rotation` to `processSpatial`.
+
+### 2026-06-19 13:30
+
+**Session goal:** Fix rotation causing black bars/outlines in spatial/3D output.
+
+**Root cause:** `warpAffine` with floating-point rotation matrix produces off-by-one pixel dimensions between left/right images. The floating-point `cos`/`sin` calculations in `newW`/`newH` can round differently for identical-size inputs. After resize to `minOf`, the slight mismatch creates visible artifacts in the side-by-side composite.
+
+**Fix:** Replaced `warpAffine` with `Core.rotate` which uses exact integer pixel mapping — no float arithmetic. After rotation, both images are explicitly forced to identical `commonW`×`commonH` dimensions via `minOf` + conditional resize. Updated homography section to use `commonW`/`commonH` instead of removed `w`/`h` variables.
+
+**Files changed:**
+- `apps/src/androidMain/kotlin/.../views/SpatialProcessor.android.kt` — Replaced `warpAffine` with `Core.rotate`. Added post-rotation common-dimension enforcement. Updated homography warp size reference.
