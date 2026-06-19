@@ -280,3 +280,95 @@ Secondary issues discovered and fixed:
 
 **Files changed:**
 - `apps/src/androidMain/kotlin/.../views/SpatialProcessor.android.kt` — Replaced `warpAffine` with `Core.rotate`. Added post-rotation common-dimension enforcement. Updated homography warp size reference.
+
+### 2026-06-19 14:00
+
+**Session goal:** Add equirectangular projection and XMP metadata to Photo Sphere output.
+
+**Summary:** The Photo Sphere pipeline previously output a flat homography-stitched panorama. This session rewrote the processor to use gyroscope orientation data for true spherical projection, producing a 4096×2048 equirectangular image with embedded Google Photo Sphere XMP metadata.
+
+**Key changes:**
+
+1. **Gyroscope-based spherical projection** — When orientations (azimuth, pitch) are provided for each frame, the processor projects each image onto a sphere using estimated camera intrinsics (~70° HFOV). Uses backward mapping: each equirectangular output pixel samples the corresponding input frame pixel via bilinear interpolation. Weighted averaging blends overlapping frames (Gaussian falloff from image center). Falls back to homography stitching when orientations are unavailable.
+
+2. **XMP Photo Sphere metadata** — After saving, the JPEG is post-processed to embed Google Photo Sphere XMP metadata (APP1 marker before EOI). Includes ProjectionType=equirectangular, UsePanoramaViewer=True, FullPanoWidth/Height, CroppedArea, StitchingSoftware=Prescent, PoseHeadingDegrees.
+
+3. **Signature change** — `processPhotoSphere()` now accepts `orientations: List<Pair<Float, Float>>` parameter. Expect/actual chain updated across all platforms. PhotoSpherePage passes orientations from CameraPage's `sphereOrientations` list.
+
+4. **Grid overlay fix** — KiteUI `background` property is now `protected` on `NativeElement`. Replaced colored grid cells with Unicode symbols (◉ current, ● captured, ○ empty).
+
+**Files changed:**
+- `apps/src/commonMain/kotlin/.../views/PhotoSphereProcessor.kt` — Added `orientations` parameter to expect declaration.
+- `apps/src/commonMain/kotlin/.../views/PhotoSpherePage.kt` — Added `orientations` constructor param, passes to `processPhotoSphere`.
+- `apps/src/commonMain/kotlin/.../views/CameraPage.kt` — Passes `sphereOrientations.toList()` to `PhotoSpherePage`. Replaced colored grid cells with Unicode symbol indicators.
+- `apps/src/androidMain/kotlin/.../views/PhotoSphereProcessor.android.kt` — Full rewrite: `processSphereOrientations()` (gyroscope-based spherical projection + equirectangular output), `embedXmpMetadata()` (XMP APP1 embedding), `saveOutputImage()` (MediaStore save to PhotoSphere subfolder), `processHomographyFallback()` (previous homography stitch kept as fallback).
+- `apps/src/iosMain/kotlin/.../views/PhotoSphereProcessor.ios.kt` — Updated stub signature.
+- `apps/src/jsMain/kotlin/.../views/PhotoSphereProcessor.js.kt` — Updated stub signature.
+- `features.md` — Marked Equirectangular projection [x] and XMP metadata [x].
+- `ROADMAP.md` — Updated Photo Sphere checklist with equirectangular and XMP items.
+
+### 2026-06-19 14:30
+
+**Session goal:** Widen Photo Sphere guidance grid from 3×3 to full 360° coverage.
+
+**Changes in `CameraPage.kt`:**
+- Grid changed from 3×3 (90°×60°) to **8 columns × 3 rows** (360°×90°)
+- Each column = 45° azimuth, each row = 30° pitch (-45° to +45°)
+- `orientationToCell` wraps azimuth to [-180°, +180°] around reference, maps to 8 bins
+- `nextCellHint` uses Manhattan distance with **column wrap-around** so it says "turn left" when the nearest empty cell is on the other side of the ring
+- Grid rendering updated to 8 columns (1.2rem cells), coverage counter shows "/ 24"
+- Companion object constants used throughout for DRY
+
+### 2026-06-19 15:00
+
+**Session goal:** Add Photomatix-style hybrid HDR pipelines combining multiple tone-mapping algorithms.
+
+**Summary:** Implemented two new algorithms that blend individual tone-mapping operators together:
+
+1. **Hybrid (Reinhard + Fattal):** Builds a single HDR radiance map, then tone-maps it with both Reinhard (natural global compression) and Fattal (gradient-domain detail). The Reinhard result provides natural colors and lighting; the Fattal detail ratio is extracted via luminance division, smoothed, and injected back into Reinhard. `surrealAmount` controls the blend strength.
+
+2. **Contrast Optimizer (Mertens + Fattal):** Uses Mertens Exposure Fusion as a clean, halo-free base (via `createMergeMertens`), then builds a separate HDR radiance map for the Fattal detail pass. Fattal detail is applied only to the luminance channel of the Mertens result, with gamma-compressed factor blending to prevent over-boosting.
+
+3. **Lighting Adjustments slider:** A `surrealAmount` (0.0–1.0) parameter with Natural/Balanced/Surreal labels controls the blend across both new algorithms. At 0.0 = pure base algorithm, at 1.0 = full detail injection.
+
+4. **UI:** Default algorithm changed to Hybrid. Algorithm picker row expanded with Hybrid and Contrast Optimizer toggles. Surreal slider shown conditionally with descriptive labels. Per-algorithm parameter sections added for both new algorithms. All parameters feed into the reactive preview pipeline.
+
+**Files changed:**
+- `apps/src/commonMain/.../views/HdrProcessor.kt` — Added `surrealAmount: Float = 0.5f` to expect declaration.
+- `apps/src/androidMain/.../views/HdrProcessor.android.kt` — Added `hybridToneMap()` (Reinhard + Fattal), `contrastOptimizer()` (Mertens + Fattal luminance). Changed main algorithm dispatch to route "Hybrid" and "Contrast Optimizer" cases. Added `surrealAmount` to actual signature.
+- `apps/src/commonMain/.../views/HdrProcessingPage.kt` — Added `surrealAmount` Signal, updated `algorithms` list, added surreal slider with descriptive label, Hybrid and Contrast Optimizer parameter sections, wired `surrealAmount` into reactive preview trigger and `processHdrInternal` call.
+- `apps/src/iosMain/.../views/HdrProcessor.ios.kt` — Added `surrealAmount` to stub.
+- `apps/src/jsMain/.../views/HdrProcessor.js.kt` — Added `surrealAmount` to stub.
+
+### 2026-06-19 15:30
+
+**Session goal:** Fix Hybrid and Contrast Optimizer producing unrealistic photos; add more hybrid algorithms.
+
+**Root cause of weird photos:** Both algorithms divided independently tone-mapped luminance values: `Core.divide(fattalLum, reinhardLum, detailRatio)`. Fattal and Reinhard produce wildly different per-pixel luminance — Fattal can make shadows 10× brighter while Reinhard keeps them natural. Dividing these creates ratios from 0.1× to 20×, causing massively over/under-bright regions when multiplied back into RGB channels. The subsequent blur didn't fix this because the fundamental approach was wrong.
+
+**Fix — single-output unsharp mask approach:** Both algorithms now tone-map ONCE (Reinhard for Hybrid, Mertens for Contrast Optimizer), extract luminance, then apply a standard Photoshop-style unsharp mask on luminance only:
+1. `GaussianBlur(lum)` → base
+2. `detail = lum - base`
+3. `enhanced = lum + amount × detail` where `amount = surreal × strength × 3`
+4. `ratio = enhanced / lum` (typically 0.5–2.0, well-behaved)
+5. Multiply ratio into all RGB channels — perfectly preserves hue
+
+Parameters repurposed: `fattalAlpha` → Detail Radius (blur kernel size), `fattalBeta` → Detail Strength (combines with surreal), `fattalColorSaturation` → saturation boost via gamma on ratio.
+
+**New algorithms added:**
+
+3. **Durand (Bilateral Filter):** HDR → Debevec merge → log-luminance → `bilateralFilter` for edge-preserving base/detail decomposition → compress base to 40%, amplify detail by `1 + surreal×2` → exponentiate → color ratio. Classic Durand & Dorsey 2002 approach. Gamma correction applied at end.
+
+4. **CLAHE Boost:** Mertens fusion → Lab color space → CLAHE on L channel (clipLimit=2.0, tile=8×8) → blend original/enhanced by `surrealAmount` → convert back to RGB. Gives natural-looking local contrast without halos.
+
+**UI updates:**
+- Algorithm list: 4 new + 6 existing = 10 total
+- Surreal slider now shows for all 4 hybrid algorithms
+- Contrast Optimizer label: "Clean Mertens fusion + unsharp mask detail on luminance only"
+- Per-algorithm sliders relabeled (Detail Radius, Detail Strength, Color Saturation)
+- Durand section: Gamma, Radius, Saturation sliders
+- CLAHE Boost section: Contrast, Saturation sliders
+
+**Files changed:**
+- `apps/src/androidMain/.../views/HdrProcessor.android.kt` — Rewrote `hybridToneMap()` (unsharp mask on Reinhard luminance), rewrote `contrastOptimizer()` (unsharp mask on Mertens luminance). Added `durandToneMap()` (bilateral filter base/detail decomposition with log-luminance). Added `claheToneMap()` (Mertens + CLAHE on Lab L channel). Updated main dispatch for 4 algorithm cases.
+- `apps/src/commonMain/.../views/HdrProcessingPage.kt` — Added "Durand" and "CLAHE Boost" to algorithms list. Added UI sections for both with parameter sliders. Updated surreal slider condition for all 4 hybrid algorithms. Fixed Contrast Optimizer subtext and slider labels.

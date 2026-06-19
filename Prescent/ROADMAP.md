@@ -56,6 +56,8 @@ This document outlines the long-term plan for the Prescent computational photogr
   - Feature-matching stitch pipeline (ORB + RANSAC homography)
   - Auto-crop black borders after stitching
   - Preview and export stitched panorama
+  - Gyroscope-guided spherical projection (equirectangular 2:1 output)
+  - XMP Photo Sphere metadata embedding for Google Photos 360° compatibility
 
 ## Phase 4: Desktop & Pro Features
 - [ ] **Desktop Application:**

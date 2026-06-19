@@ -22,7 +22,9 @@ actual fun ElementWriter.cameraView(
     onFocusStackCaptured: ((List<String>) -> Unit)?,
     isSpatial: Signal<Boolean>,
     spatialCaptureTrigger: Signal<Int>,
-    onSpatialCaptured: ((List<String>) -> Unit)?
+    onSpatialCaptured: ((List<String>) -> Unit)?,
+    onSphereOrientationUpdate: ((Pair<Float, Float>) -> Unit)?,
+    onSphereFrameOrientation: ((Float, Float) -> Unit)?
 ) {
     text("Camera View (iOS — coming soon)")
 }

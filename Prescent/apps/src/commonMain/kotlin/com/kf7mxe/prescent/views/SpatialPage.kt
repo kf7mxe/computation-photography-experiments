@@ -57,7 +57,7 @@ class SpatialPage(val frames: List<String> = listOf()) : Page, FullscreenPage {
                 // ── Source image pair ─────────────────────────────────────
                 padded.scrolling.row {
                     frames.forEach { path ->
-                        sizedBox(SizeConstraints(width = 5.rem, height = 5.rem)).image {
+                        sizedBox(SizeConstraints(width = 10.rem, height = 20.rem)).image {
                             source = ImageRemote(if (path.startsWith("/")) "file://$path" else path)
                         }
                     }

@@ -21,5 +21,9 @@ expect fun ElementWriter.cameraView(
     onFocusStackCaptured: ((List<String>) -> Unit)? = null,
     isSpatial: Signal<Boolean> = Signal(false),
     spatialCaptureTrigger: Signal<Int> = Signal(0),
-    onSpatialCaptured: ((List<String>) -> Unit)? = null
+    onSpatialCaptured: ((List<String>) -> Unit)? = null,
+    // Photo Sphere — fires live (azimuth, pitch) updates for guidance overlay
+    onSphereOrientationUpdate: ((Pair<Float, Float>) -> Unit)? = null,
+    // Photo Sphere — fires with the orientation of each captured frame
+    onSphereFrameOrientation: ((Float, Float) -> Unit)? = null
 )

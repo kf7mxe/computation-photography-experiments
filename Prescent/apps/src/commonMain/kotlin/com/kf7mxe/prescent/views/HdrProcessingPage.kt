@@ -26,7 +26,7 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
     override val title: Reactive<String> get() = Constant("HDR Processing")
 
     val alignmentOption = Signal("MTB")
-    val tonemapAlgorithm = Signal("Mertens")
+    val tonemapAlgorithm = Signal("Hybrid")
     val ghostingStrength = Signal(0.0f)
     val cropAfterAlignment = Signal(false)
 
@@ -56,6 +56,9 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
     val icam06ChromaticAdaptation = Signal(1.0f)
     val icam06LocalAdaptation = Signal(1.0f)
 
+    // Hybrid / Contrast Optimizer shared
+    val surrealAmount = Signal(0.5f)
+
     val processing = Signal(false)
     val previewProcessing = Signal(false)
     val resultImagePath = Signal<String?>(null)
@@ -64,7 +67,7 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
 
     private var previewJob: Job? = null
 
-    private val algorithms = listOf("Mertens", "Reinhard", "Drago", "Mantiuk", "Fattal", "iCam06")
+    private val algorithms = listOf("Hybrid", "Contrast Optimizer", "Durand", "CLAHE Boost", "Mertens", "Reinhard", "Drago", "Mantiuk", "Fattal", "iCam06")
 
     override fun ElementWriter.CanAddTheme.render() {
         col {
@@ -114,7 +117,110 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
                         }
                     }
 
+                    // ── Lighting Adjustments (surreal↔natural) ──────────
+                    shownWhen {
+                        tonemapAlgorithm() == "Hybrid" ||
+                        tonemapAlgorithm() == "Contrast Optimizer" ||
+                        tonemapAlgorithm() == "Durand" ||
+                        tonemapAlgorithm() == "CLAHE Boost"
+                    }.col {
+                        h2 { content = "Lighting Adjustments" }
+                        col {
+                            text { ::content {
+                                val s = surrealAmount()
+                                when {
+                                    s < 0.25 -> "Natural"
+                                    s < 0.45 -> "Balanced → Natural"
+                                    s < 0.55 -> "Balanced"
+                                    s < 0.75 -> "Surreal → Balanced"
+                                    else -> "Surreal"
+                                }
+                            } }
+                            slider { range(0.0f, 1.0f, 0.05f); value.bind(surrealAmount) }
+                        }
+                    }
+
                     // ── Per-algorithm settings ────────────────────────────
+
+                    // Hybrid (Reinhard + unsharp mask on luminance)
+                    shownWhen { tonemapAlgorithm() == "Hybrid" }.col {
+                        h2 { content = "Hybrid: Base + Detail" }
+                        subtext("Reinhard tone mapping with unsharp mask detail enhancement on luminance")
+                        col {
+                            text { ::content { "Gamma: ${gamma().fmt()}" } }
+                            slider { range(0.1f, 5.0f, 0.1f); value.bind(gamma) }
+                        }
+                        col {
+                            text { ::content { "Intensity: ${intensity().fmt()}" } }
+                            slider { range(0.0f, 2.0f, 0.1f); value.bind(intensity) }
+                        }
+                        col {
+                            text { ::content { "Detail Radius: ${fattalAlpha().fmt()}" } }
+                            slider { range(0.01f, 0.5f, 0.01f); value.bind(fattalAlpha) }
+                        }
+                        col {
+                            text { ::content { "Detail Strength: ${fattalBeta().fmt()}" } }
+                            slider { range(0.1f, 1.0f, 0.05f); value.bind(fattalBeta) }
+                        }
+                        col {
+                            text { ::content { "Color Saturation: ${fattalColorSaturation().fmt()}" } }
+                            slider { range(0.0f, 1.0f, 0.05f); value.bind(fattalColorSaturation) }
+                        }
+                    }
+
+                    // Contrast Optimizer (Mertens + unsharp mask on luminance)
+                    shownWhen { tonemapAlgorithm() == "Contrast Optimizer" }.col {
+                        h2 { content = "Contrast Optimizer" }
+                        subtext("Clean Mertens fusion + unsharp mask detail on luminance only")
+                        col {
+                            text { ::content { "Contrast: ${contrastWeight().fmt()}" } }
+                            slider { range(0.0f, 2.0f, 0.1f); value.bind(contrastWeight) }
+                        }
+                        col {
+                            text { ::content { "Saturation: ${saturationWeight().fmt()}" } }
+                            slider { range(0.0f, 2.0f, 0.1f); value.bind(saturationWeight) }
+                        }
+                        col {
+                            text { ::content { "Detail Radius: ${fattalAlpha().fmt()}" } }
+                            slider { range(0.01f, 0.5f, 0.01f); value.bind(fattalAlpha) }
+                        }
+                        col {
+                            text { ::content { "Detail Strength: ${fattalBeta().fmt()}" } }
+                            slider { range(0.1f, 1.0f, 0.05f); value.bind(fattalBeta) }
+                        }
+                    }
+
+                    // Durand (Bilateral Filter)
+                    shownWhen { tonemapAlgorithm() == "Durand" }.col {
+                        h2 { content = "Durand Bilateral Filter" }
+                        subtext("Edge-preserving base/detail in log-luminance. Compresses large contrast while retaining fine detail.")
+                        col {
+                            text { ::content { "Gamma: ${gamma().fmt()}" } }
+                            slider { range(0.1f, 5.0f, 0.1f); value.bind(gamma) }
+                        }
+                        col {
+                            text { ::content { "Radius: ${fattalAlpha().fmt()}" } }
+                            slider { range(0.01f, 0.5f, 0.01f); value.bind(fattalAlpha) }
+                        }
+                        col {
+                            text { ::content { "Saturation: ${saturationWeight().fmt()}" } }
+                            slider { range(0.0f, 2.0f, 0.1f); value.bind(saturationWeight) }
+                        }
+                    }
+
+                    // CLAHE Boost
+                    shownWhen { tonemapAlgorithm() == "CLAHE Boost" }.col {
+                        h2 { content = "CLAHE Boost" }
+                        subtext("Mertens fusion + CLAHE on luminance for natural local contrast")
+                        col {
+                            text { ::content { "Contrast: ${contrastWeight().fmt()}" } }
+                            slider { range(0.0f, 2.0f, 0.1f); value.bind(contrastWeight) }
+                        }
+                        col {
+                            text { ::content { "Saturation: ${saturationWeight().fmt()}" } }
+                            slider { range(0.0f, 2.0f, 0.1f); value.bind(saturationWeight) }
+                        }
+                    }
                     // Mertens (Exposure Fusion)
                     shownWhen { tonemapAlgorithm() == "Mertens" }.col {
                         h2 { content = "Exposure Fusion Settings" }
@@ -222,6 +328,12 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
                     }
                 }
 
+                // ── Randomize Button ─────────────────────────────────────────
+                padded.important.button {
+                    text("Surprise Me!")
+                    onClick { randomizeSettings() }
+                }
+
                 // ── Alignment Settings ────────────────────────────────────
                 card.padded.col {
                     h2 { content = "Alignment" }
@@ -314,6 +426,7 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
                 fattalColorSaturation()
                 icam06ChromaticAdaptation()
                 icam06LocalAdaptation()
+                surrealAmount()
 
                 previewJob?.cancel()
                 previewJob = launch {
@@ -354,6 +467,7 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
                 fattalColorSaturation = fattalColorSaturation.value,
                 icam06ChromaticAdaptation = icam06ChromaticAdaptation.value,
                 icam06LocalAdaptation = icam06LocalAdaptation.value,
+                surrealAmount = surrealAmount.value,
                 maxSize = if (fullSize) 0 else 1024
             )
             if (fullSize) {
@@ -368,5 +482,37 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
             if (fullSize) processing.value = false
             else previewProcessing.value = false
         }
+    }
+
+    private fun randomizeSettings() {
+        val rng = kotlin.random.Random
+        val hybridAlgorithms = listOf("Hybrid", "Contrast Optimizer", "Durand", "CLAHE Boost")
+        val singleAlgorithms = listOf("Mertens", "Reinhard", "Drago", "Mantiuk", "Fattal", "iCam06")
+
+        tonemapAlgorithm.value = if (rng.nextFloat() < 0.5f) {
+            hybridAlgorithms[rng.nextInt(hybridAlgorithms.size)]
+        } else {
+            singleAlgorithms[rng.nextInt(singleAlgorithms.size)]
+        }
+
+        alignmentOption.value = listOf("MTB", "ECC", "Feature", "Skip")[rng.nextInt(4)]
+        ghostingStrength.value = rng.nextFloat() * 0.8f
+        cropAfterAlignment.value = rng.nextBoolean()
+
+        contrastWeight.value = 0.5f + rng.nextFloat() * 1.5f
+        saturationWeight.value = 0.5f + rng.nextFloat() * 1.5f
+        exposureWeight.value = rng.nextFloat() * 1.5f
+        gamma.value = 0.5f + rng.nextFloat() * 3.0f
+        intensity.value = rng.nextFloat() * 1.5f
+        lightAdaptation.value = rng.nextFloat() * 1.5f
+        colorAdaptation.value = rng.nextFloat() * 1.5f
+        dragoBias.value = 0.3f + rng.nextFloat() * 1.2f
+        mantiukScale.value = 0.2f + rng.nextFloat() * 1.5f
+        fattalAlpha.value = 0.02f + rng.nextFloat() * 0.4f
+        fattalBeta.value = 0.2f + rng.nextFloat() * 0.7f
+        fattalColorSaturation.value = rng.nextFloat() * 0.8f
+        icam06ChromaticAdaptation.value = 0.5f + rng.nextFloat() * 1.5f
+        icam06LocalAdaptation.value = 0.5f + rng.nextFloat() * 4.0f
+        surrealAmount.value = rng.nextFloat()
     }
 }

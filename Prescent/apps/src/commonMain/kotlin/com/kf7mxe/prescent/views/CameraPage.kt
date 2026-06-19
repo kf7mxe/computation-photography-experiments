@@ -16,6 +16,7 @@ import com.lightningkite.reactive.core.Signal
 import com.lightningkite.reactive.context.reactive
 import com.lightningkite.reactive.extensions.equalTo
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 class CameraPage : Page, FullscreenPage {
 
@@ -26,32 +27,89 @@ class CameraPage : Page, FullscreenPage {
     val cameraLens = Signal(0)
     val cameraLabels = Signal(listOf(0 to "Back", 1 to "Front"))
 
-    // Night Sight
     val isNightSight = Signal(false)
     val nightSightFrameCount = Signal(8)
     val nightSightCaptureTrigger = Signal(0)
 
-    // Focus Stack
     val isFocusStacking = Signal(false)
     val focusStackFrameCount = Signal(6)
     val focusStackCaptureTrigger = Signal(0)
 
-    // Spatial / 3D
     val isSpatial = Signal(false)
     val spatialCaptureTrigger = Signal(0)
 
-    // Photo Sphere (accumulates single shots)
     val sphereFrames = Signal<List<String>>(listOf())
+    val sphereOrientations = mutableListOf<Pair<Float, Float>>()
+    val sphereCurrentOrientation = Signal(0f to 0f)
+    var sphereRefAz: Float? = null
 
-    // Capture mode: "hdr", "single", "night", "focus", "spatial", "sphere"
     val captureMode = Signal("hdr")
+
+    // Grid: 3 rows (pitch) × 8 cols (azimuth), full 360° × 90°
+    // Each column = 45° azimuth, each row = 30° pitch (-45° to +45°)
+    companion object {
+        const val GRID_ROWS = 3
+        const val GRID_COLS = 8
+        const val COL_DEG = 45f
+        const val PITCH_MIN = -45f
+        const val PITCH_STEP = 30f
+    }
+
+    data class GridCell(val row: Int, val col: Int)
+    fun orientationToCell(azimuth: Float, pitch: Float): GridCell? {
+        val refAz = sphereRefAz ?: return null
+        var dAz = (azimuth - refAz) % 360f
+        if (dAz < -180f) dAz += 360f
+        if (dAz >= 180f) dAz -= 360f
+        val col = ((dAz + 180f) / COL_DEG).toInt().coerceIn(0, GRID_COLS - 1)
+        val row = ((pitch - PITCH_MIN) / PITCH_STEP).toInt().coerceIn(0, GRID_ROWS - 1)
+        return GridCell(row, col)
+    }
+
+    val sphereGrid = Signal(List(GRID_ROWS) { MutableList(GRID_COLS) { false } })
+
+    fun recomputeGrid() {
+        val grid = MutableList(GRID_ROWS) { MutableList(GRID_COLS) { false } }
+        for ((az, pitch) in sphereOrientations) {
+            val cell = orientationToCell(az, pitch) ?: return
+            grid[cell.row][cell.col] = true
+        }
+        sphereGrid.value = grid
+    }
+
+    fun nextCellHint(currentAz: Float, currentPitch: Float): String {
+        val grid = sphereGrid.value
+        val currentCell = orientationToCell(currentAz, currentPitch) ?: return "Point phone at scene"
+        val total = grid.sumOf { row -> row.count { it } }
+        if (total >= GRID_ROWS * GRID_COLS) return "All covered!"
+        // Find closest empty cell (Manhattan distance with wrap-around for columns)
+        var bestDist = Int.MAX_VALUE
+        var bestR = currentCell.row; var bestC = currentCell.col
+        for (r in 0 until GRID_ROWS) for (c in 0 until GRID_COLS) {
+            if (!grid[r][c]) {
+                val dRow = abs(r - currentCell.row)
+                val dCol = minOf(abs(c - currentCell.col), GRID_COLS - abs(c - currentCell.col))
+                val dist = dRow + dCol
+                if (dist < bestDist) { bestDist = dist; bestR = r; bestC = c }
+            }
+        }
+        val dirs = mutableListOf<String>()
+        if (bestR < currentCell.row) dirs.add("down")
+        if (bestR > currentCell.row) dirs.add("up")
+        val dCol = bestC - currentCell.col
+        val wrapCol = if (dCol > 0 && dCol < GRID_COLS / 2) dCol
+            else if (dCol < 0 && -dCol < GRID_COLS / 2) dCol
+            else if (dCol > 0) dCol - GRID_COLS
+            else dCol + GRID_COLS
+        if (wrapCol < 0) dirs.add("left")
+        if (wrapCol > 0) dirs.add("right")
+        return "Move ${dirs.joinToString("+")}"
+    }
 
     override fun ElementWriter.CanAddTheme.render() {
         col {
-            // ── Top Bar ───────────────────────────────────────────────────
             padded.row {
                 centered.expanding.h2 { content = "Prescent" }
-
                 button {
                     icon(Icon.settings, "Settings")
                     onClick { GlobalNavigator.main.navigate(SettingsPage()) }
@@ -63,7 +121,6 @@ class CameraPage : Page, FullscreenPage {
                 evOffsetStore().toFloatOrNull()?.let { evOffset.value = it }
             }
 
-            // ── Capture Mode Selector ─────────────────────────────────────
             padded.row {
                 listOf("hdr" to "HDR", "single" to "Photo", "night" to "Night", "focus" to "Focus", "spatial" to "Spatial", "sphere" to "Sphere").forEach { (mode, label) ->
                     expanding.toggleButton {
@@ -72,7 +129,6 @@ class CameraPage : Page, FullscreenPage {
                 }
             }
 
-            // Sync captureMode → individual signals
             reactive {
                 when (captureMode()) {
                     "hdr" -> { isHdrMode.value = true; isNightSight.value = false; isFocusStacking.value = false; isSpatial.value = false }
@@ -84,14 +140,14 @@ class CameraPage : Page, FullscreenPage {
                 }
             }
 
-            // Reset sphere frames when leaving sphere mode
             reactive {
                 if (captureMode() != "sphere" && sphereFrames().isNotEmpty()) {
                     sphereFrames.value = listOf()
+                    sphereOrientations.clear()
+                    sphereRefAz = null
                 }
             }
 
-            // ── Camera Viewfinder ─────────────────────────────────────────
             expanding.frame {
                 cameraView(
                     shutterTrigger = shutterTrigger,
@@ -126,6 +182,14 @@ class CameraPage : Page, FullscreenPage {
                     },
                     onCameraLabels = { labels ->
                         cameraLabels.value = labels.mapIndexed { idx, l -> idx to l }
+                    },
+                    onSphereOrientationUpdate = { (az, pitch) ->
+                        sphereCurrentOrientation.value = az to pitch
+                    },
+                    onSphereFrameOrientation = { az, pitch ->
+                        if (sphereRefAz == null) sphereRefAz = az
+                        sphereOrientations.add(az to pitch)
+                        recomputeGrid()
                     }
                 )
 
@@ -151,6 +215,47 @@ class CameraPage : Page, FullscreenPage {
                 shownWhen { isSpatial() }.frame {
                     atTopEnd.card.padded.col {
                         text("Stereo pair")
+                    }
+                }
+
+                // ── Sphere guidance overlay ────────────────────────────────
+                shownWhen { captureMode() == "sphere" }.frame {
+                    atBottomStart.padded.row {
+                        col {
+                            (0 until GRID_ROWS).forEach { r ->
+                                row {
+                                    (0 until GRID_COLS).forEach { c ->
+                                        sizedBox(SizeConstraints(width = 1.2.rem, height = 1.2.rem)).frame {
+                                            centered.text {
+                                                reactive {
+                                                    val grid = sphereGrid()
+                                                    val captured = grid.getOrNull(r)?.getOrNull(c) ?: false
+                                                    val cur = sphereCurrentOrientation()
+                                                    val curCell = orientationToCell(cur.first, cur.second)
+                                                    val isCurrent = curCell != null && curCell.row == r && curCell.col == c
+                                                    content = when {
+                                                        isCurrent -> "\u25C9"
+                                                        captured -> "\u25CF"
+                                                        else -> "\u25CB"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        padded.col {
+                            reactive {
+                                val cur = sphereCurrentOrientation()
+                                text(nextCellHint(cur.first, cur.second))
+                            }
+                            reactive {
+                                val total = sphereGrid.value.sumOf { row -> row.count { it } }
+                                text("$total / ${GRID_ROWS * GRID_COLS} covered")
+                            }
+                            text { ::content { "${sphereFrames().size} shots" } }
+                        }
                     }
                 }
 
@@ -196,17 +301,20 @@ class CameraPage : Page, FullscreenPage {
                 }
             }
 
-            // ── Sphere: Stitch All button when frames accumulated ────────
             shownWhen { captureMode() == "sphere" && sphereFrames().size >= 2 }.frame {
                 padded.important.button {
                     text { ::content { "Stitch ${sphereFrames().size} frames" } }
                     onClick {
-                        GlobalNavigator.main.navigate(PhotoSpherePage(sphereFrames.value))
+                        GlobalNavigator.main.navigate(
+                            PhotoSpherePage(
+                                frames = sphereFrames.value,
+                                orientations = sphereOrientations.toList()
+                            )
+                        )
                     }
                 }
             }
 
-            // ── Lens Selector ─────────────────────────────────────────────
             padded.row {
                 text("Lens:")
                 forEach(cameraLabels) { (idx, label) ->

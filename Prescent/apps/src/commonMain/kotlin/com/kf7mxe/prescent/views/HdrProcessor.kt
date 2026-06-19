@@ -20,5 +20,6 @@ expect suspend fun processHdr(
     fattalColorSaturation: Float = 0.5f,
     icam06ChromaticAdaptation: Float = 1.0f,
     icam06LocalAdaptation: Float = 1.0f,
+    surrealAmount: Float = 0.5f,
     maxSize: Int = 0
 ): String?

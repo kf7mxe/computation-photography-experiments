@@ -198,9 +198,9 @@ Algorithms to include:
 - [x] Feature-matching stitch pipeline (ORB + RANSAC homography)
 - [x] Auto-crop black borders after stitching (row/column scan)
 - [x] Preview and export stitched panorama
-- [ ] Gyroscope-guided capture overlay
-- [ ] Equirectangular projection output
-- [ ] XMP Photo Sphere metadata
+- [x] Gyroscope-guided capture overlay (3×3 grid with direction hints)
+- [x] Equirectangular projection output (4096×2048 2:1 format)
+- [x] XMP Photo Sphere metadata (Google Photos 360° compatibility)
 - [ ] In-app sphere viewer
 
 ---

@@ -15,7 +15,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-class PhotoSpherePage(val frames: List<String> = listOf()) : Page, FullscreenPage {
+class PhotoSpherePage(
+    val frames: List<String> = listOf(),
+    val orientations: List<Pair<Float, Float>> = listOf()
+) : Page, FullscreenPage {
     override val title: Reactive<String> get() = Constant("Photo Sphere")
 
     val isProcessing = Signal(false)
@@ -121,6 +124,7 @@ class PhotoSpherePage(val frames: List<String> = listOf()) : Page, FullscreenPag
         try {
             val result = processPhotoSphere(
                 frames,
+                orientations = orientations,
                 maxPreviewSize = if (fullSize) 0 else 1024
             )
             if (fullSize) {

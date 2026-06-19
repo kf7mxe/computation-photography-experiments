@@ -4,6 +4,10 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
@@ -44,7 +48,9 @@ actual fun ElementWriter.cameraView(
     onFocusStackCaptured: ((List<String>) -> Unit)?,
     isSpatial: Signal<Boolean>,
     spatialCaptureTrigger: Signal<Int>,
-    onSpatialCaptured: ((List<String>) -> Unit)?
+    onSpatialCaptured: ((List<String>) -> Unit)?,
+    onSphereOrientationUpdate: ((Pair<Float, Float>) -> Unit)?,
+    onSphereFrameOrientation: ((Float, Float) -> Unit)?
 ) {
     val androidContext = AndroidAppContext.applicationCtx
     val mainExecutor = ContextCompat.getMainExecutor(androidContext)
@@ -70,6 +76,30 @@ actual fun ElementWriter.cameraView(
         AndroidAppContext.requestPermissions(Manifest.permission.CAMERA) { result ->
             Log.d("CameraView", "Permission result: ${result.accepted}")
         }
+    }
+
+    // ── Rotation sensor for Photo Sphere guidance ───────────────────────
+    var currentAzimuth = 0f
+    var currentPitch = 0f
+    try {
+        val sensorManager = androidContext.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        if (rotationSensor != null) {
+            sensorManager.registerListener(object : SensorEventListener {
+                val rotationMatrix = FloatArray(9)
+                val orientation = FloatArray(3)
+                override fun onSensorChanged(event: SensorEvent) {
+                    SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+                    SensorManager.getOrientation(rotationMatrix, orientation)
+                    currentAzimuth = Math.toDegrees(orientation[0].toDouble()).toFloat()
+                    currentPitch = Math.toDegrees(orientation[1].toDouble()).toFloat()
+                    onSphereOrientationUpdate?.invoke(currentAzimuth to currentPitch)
+                }
+                override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
+            }, rotationSensor, SensorManager.SENSOR_DELAY_GAME)
+        }
+    } catch (e: Exception) {
+        Log.e("CameraView", "Rotation sensor init failed", e)
     }
 
     data class CameraEntry(
@@ -255,6 +285,7 @@ actual fun ElementWriter.cameraView(
 
     fun captureSingleShot() {
         Log.d("CameraView", "captureSingleShot")
+        onSphereFrameOrientation?.invoke(currentAzimuth, currentPitch)
         val ic = imageCapture ?: return
         val captureDir = File(androidContext.filesDir, "captures/${System.currentTimeMillis()}").also { it.mkdirs() }
         val file = File(captureDir, "shot.jpg")

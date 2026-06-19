@@ -42,6 +42,7 @@ import org.opencv.video.Video
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.math.max
+import kotlin.math.min
 
 actual suspend fun processHdr(
     images: List<String>,
@@ -63,13 +64,14 @@ actual suspend fun processHdr(
     fattalColorSaturation: Float,
     icam06ChromaticAdaptation: Float,
     icam06LocalAdaptation: Float,
+    surrealAmount: Float,
     maxSize: Int
 ): String? = withContext(Dispatchers.IO) {
     val context = AndroidAppContext.applicationCtx
     val mats = mutableListOf<Mat>()
     val isPreview = maxSize > 0
 
-    Log.d("HdrProcessor", "Starting HDR ($algorithm) with ${images.size} images, preview=$isPreview")
+    Log.d("HdrProcessor", "Starting HDR ($algorithm) with ${images.size} images, surreal=$surrealAmount, preview=$isPreview")
 
     try {
         for (imageUriString in images) {
@@ -98,17 +100,34 @@ actual suspend fun processHdr(
 
         val alignedMats = alignImages(mats, alignment)
         val croppedMats = if (cropAfterAlignment) cropValidRegion(alignedMats) else alignedMats
-        val ghostFreeMats = if (ghostingStrength > 0.01f) removeGhosting(croppedMats, ghostingStrength) else croppedMats
-        if (ghostFreeMats.size < 2) return@withContext null
+        if (croppedMats.size < 2) return@withContext null
 
         val resultMat = Mat()
         when (algorithm) {
+            "Hybrid" -> {
+                hybridToneMap(croppedMats, resultMat, surrealAmount,
+                    gamma, intensity, lightAdaptation, colorAdaptation,
+                    fattalAlpha, fattalBeta, fattalColorSaturation)
+            }
+            "Contrast Optimizer" -> {
+                contrastOptimizer(croppedMats, resultMat, surrealAmount,
+                    contrastWeight, saturationWeight, exposureWeight,
+                    fattalAlpha, fattalBeta)
+            }
+            "Durand" -> {
+                durandToneMap(croppedMats, resultMat, surrealAmount,
+                    gamma, saturationWeight, fattalAlpha)
+            }
+            "CLAHE Boost" -> {
+                claheToneMap(croppedMats, resultMat, surrealAmount,
+                    contrastWeight, saturationWeight, exposureWeight)
+            }
             "Mertens" -> {
                 val merger = Photo.createMergeMertens(contrastWeight, saturationWeight, exposureWeight)
-                merger.process(ghostFreeMats, resultMat)
+                merger.process(croppedMats, resultMat)
             }
             "Reinhard", "Drago", "Mantiuk", "Fattal", "iCam06" -> {
-                val numImages = ghostFreeMats.size
+                val numImages = croppedMats.size
                 val times = MatOfFloat()
                 val timeValues = FloatArray(numImages) { i ->
                     val evStep = 4.0f / (numImages - 1)
@@ -118,10 +137,10 @@ actual suspend fun processHdr(
                 times.fromArray(*timeValues)
                 val calibrate = Photo.createCalibrateDebevec()
                 val response = Mat()
-                calibrate.process(ghostFreeMats, response, times)
+                calibrate.process(croppedMats, response, times)
                 val merge = Photo.createMergeDebevec()
                 val hdrMat = Mat()
-                merge.process(ghostFreeMats, hdrMat, times, response)
+                merge.process(croppedMats, hdrMat, times, response)
                 response.release()
                 val rgb32f = Mat()
                 hdrMat.convertTo(rgb32f, CvType.CV_32F)
@@ -157,14 +176,22 @@ actual suspend fun processHdr(
             }
             else -> {
                 val merger = Photo.createMergeMertens(contrastWeight, saturationWeight, exposureWeight)
-                merger.process(ghostFreeMats, resultMat)
+                merger.process(croppedMats, resultMat)
             }
         }
         if (resultMat.empty()) return@withContext null
 
+        // Ghost reduction: post-process on tonemapped float output (doesn't corrupt exposure brackets)
+        val finalFloat = if (ghostingStrength > 0.01f) {
+            val reduced = Mat()
+            reduceGhostArtifacts(resultMat, reduced, ghostingStrength)
+            resultMat.release()
+            reduced
+        } else resultMat
+
         val final8bit = Mat()
-        resultMat.convertTo(final8bit, CvType.CV_8UC3, 255.0)
-        resultMat.release()
+        finalFloat.convertTo(final8bit, CvType.CV_8UC3, 255.0)
+        finalFloat.release()
         val rgbFinal = Mat()
         Imgproc.cvtColor(final8bit, rgbFinal, Imgproc.COLOR_BGR2RGB)
         final8bit.release()
@@ -191,6 +218,282 @@ actual suspend fun processHdr(
     } finally {
         mats.forEach { it.release() }
     }
+}
+
+// ── Hybrid: Reinhard (base) + unsharp mask detail on luminance ────────────
+//
+// Correct approach: tone-map ONCE with Reinhard for natural colors, then
+// apply unsharp mask on luminance only. This preserves hue while enhancing
+// local contrast — the same technique Photoshop/Lightroom use for "Clarity".
+
+private fun hybridToneMap(
+    mats: List<Mat>, output: Mat,
+    surrealAmount: Float,
+    gamma: Float, intensity: Float, lightAdaptation: Float, colorAdaptation: Float,
+    detailRadius: Float, detailStrength: Float, colorSaturation: Float
+) {
+    Log.d("HdrProcessor", "Hybrid tone map (surreal=$surrealAmount)")
+
+    // 1. Build HDR radiance map
+    val numImages = mats.size
+    val times = MatOfFloat()
+    val timeValues = FloatArray(numImages) { i ->
+        Math.pow(2.0, (-2.0 + 4.0 * i / (numImages - 1)).toDouble()).toFloat()
+    }
+    times.fromArray(*timeValues)
+    val calibrate = Photo.createCalibrateDebevec()
+    val response = Mat()
+    calibrate.process(mats, response, times)
+    val merge = Photo.createMergeDebevec()
+    val hdrMat = Mat()
+    merge.process(mats, hdrMat, times, response)
+    response.release(); times.release()
+
+    // 2. Reinhard tone map → natural base
+    val base = Mat()
+    val tonemap = Photo.createTonemapReinhard().apply {
+        setGamma(gamma); setIntensity(intensity)
+        setLightAdaptation(lightAdaptation); setColorAdaptation(colorAdaptation)
+    }
+    tonemap.process(hdrMat, base)
+    hdrMat.release()
+
+    // 3. Extract luminance
+    val lum = Mat()
+    Imgproc.cvtColor(base, lum, Imgproc.COLOR_RGB2GRAY)
+
+    // 4. Unsharp mask on luminance
+    val kSize = ((detailRadius * 200.0 + 3.0).toInt() or 1).coerceIn(3, 101)
+    val blurred = Mat()
+    Imgproc.GaussianBlur(lum, blurred, Size(kSize.toDouble(), kSize.toDouble()), 0.0)
+
+    val detail = Mat()
+    Core.subtract(lum, blurred, detail)
+
+    val amount = (surrealAmount * detailStrength * 3.0f).coerceAtMost(5.0f)
+    val enhanced = Mat()
+    Core.addWeighted(lum, 1.0, detail, amount.toDouble(), 0.0, enhanced)
+    Core.max(enhanced, Scalar(1e-6), enhanced)
+
+    // 5. ratio = enhanced / lum (hue-preserving multiplier)
+    val ratio = Mat()
+    Core.divide(enhanced, lum, ratio)
+
+    // Saturation boost: gamma on ratio reduces its effect on color saturation
+    Core.pow(ratio, (1.0 - colorSaturation * 0.4).toDouble(), ratio)
+
+    // 6. Apply ratio to all RGB channels
+    val channels = mutableListOf<Mat>()
+    Core.split(base, channels)
+    for (ch in channels) {
+        Core.multiply(ch, ratio, ch)
+    }
+    Core.merge(channels, output)
+
+    base.release(); lum.release(); blurred.release()
+    detail.release(); enhanced.release(); ratio.release()
+    channels.forEach { it.release() }
+}
+
+// ── Contrast Optimizer: Mertens (clean) + unsharp mask on luminance ────────
+//
+// Correct approach: Mertens fusion first (halo-free, photorealistic), then
+// unsharp mask on luminance only for local contrast enhancement.
+
+private fun contrastOptimizer(
+    mats: List<Mat>, output: Mat,
+    surrealAmount: Float,
+    contrastWeight: Float, saturationWeight: Float, exposureWeight: Float,
+    detailRadius: Float, detailStrength: Float
+) {
+    Log.d("HdrProcessor", "Contrast Optimizer (surreal=$surrealAmount)")
+
+    // 1. Mertens exposure fusion → clean, halo-free base
+    val base = Mat()
+    val merger = Photo.createMergeMertens(contrastWeight, saturationWeight, exposureWeight)
+    merger.process(mats, base)
+
+    // 2. Extract luminance
+    val lum = Mat()
+    Imgproc.cvtColor(base, lum, Imgproc.COLOR_RGB2GRAY)
+
+    // 3. Unsharp mask on luminance
+    val kSize = ((detailRadius * 200.0 + 3.0).toInt() or 1).coerceIn(3, 101)
+    val blurred = Mat()
+    Imgproc.GaussianBlur(lum, blurred, Size(kSize.toDouble(), kSize.toDouble()), 0.0)
+
+    val detail = Mat()
+    Core.subtract(lum, blurred, detail)
+
+    val amount = (surrealAmount * detailStrength * 2.5f).coerceAtMost(4.0f)
+    val enhanced = Mat()
+    Core.addWeighted(lum, 1.0, detail, amount.toDouble(), 0.0, enhanced)
+    Core.max(enhanced, Scalar(1e-6), enhanced)
+
+    // 4. ratio = enhanced / lum
+    val ratio = Mat()
+    Core.divide(enhanced, lum, ratio)
+
+    // 5. Apply to all RGB channels
+    val channels = mutableListOf<Mat>()
+    Core.split(base, channels)
+    for (ch in channels) {
+        Core.multiply(ch, ratio, ch)
+    }
+    Core.merge(channels, output)
+
+    base.release(); lum.release(); blurred.release()
+    detail.release(); enhanced.release(); ratio.release()
+    channels.forEach { it.release() }
+}
+
+// ── Durand (Bilateral Filter): edge-preserving base/detail decomposition ──
+//
+// Durand & Dorsey 2002: separates HDR log-luminance into base (large-scale)
+// and detail (small-scale) using a bilateral filter. The base is compressed
+// to fit display range while detail is preserved/amplified.
+
+private fun durandToneMap(
+    mats: List<Mat>, output: Mat,
+    surrealAmount: Float,
+    gamma: Float, saturationWeight: Float,
+    detailRadius: Float
+) {
+    Log.d("HdrProcessor", "Durand bilateral filter (surreal=$surrealAmount)")
+
+    val eps = 1e-6
+
+    // 1. Build HDR radiance map
+    val numImages = mats.size
+    val times = MatOfFloat()
+    val timeValues = FloatArray(numImages) { i ->
+        Math.pow(2.0, (-2.0 + 4.0 * i / (numImages - 1)).toDouble()).toFloat()
+    }
+    times.fromArray(*timeValues)
+    val calibrate = Photo.createCalibrateDebevec()
+    val response = Mat()
+    calibrate.process(mats, response, times)
+    val merge = Photo.createMergeDebevec()
+    val hdrMat = Mat()
+    merge.process(mats, hdrMat, times, response)
+    response.release(); times.release()
+
+    val hdr32f = Mat()
+    hdrMat.convertTo(hdr32f, CvType.CV_32F)
+
+    // 2. Compute luminance
+    val lum = Mat()
+    Imgproc.cvtColor(hdr32f, lum, Imgproc.COLOR_RGB2GRAY)
+    Core.add(lum, Scalar(eps), lum)
+
+    // 3. Log luminance
+    val logLum = Mat()
+    Core.log(lum, logLum)
+
+    // 4. Bilateral filter on log-luminance (edge-preserving base)
+    val d = ((detailRadius * 60.0 + 5.0).toInt() or 1).coerceIn(5, 65)
+    val sigmaColor = 30.0; val sigmaSpace = 30.0
+    val baseLog = Mat()
+    Imgproc.bilateralFilter(logLum, baseLog, d, sigmaColor, sigmaSpace)
+
+    // 5. detail = logLum - baseLog
+    val detailLog = Mat()
+    Core.subtract(logLum, baseLog, detailLog)
+
+    // 6. Compress base to ~40% of its range, amplify detail
+    val compression = 0.4
+    val detailBoost = 1.0 + surrealAmount * 2.0
+
+    val compressedBase = Mat()
+    Core.multiply(baseLog, Scalar(compression), compressedBase)
+
+    val boostedDetail = Mat()
+    Core.multiply(detailLog, Scalar(detailBoost), boostedDetail)
+
+    val newLogLum = Mat()
+    Core.add(compressedBase, boostedDetail, newLogLum)
+
+    // 7. exp → linear luminance
+    val newLum = Mat()
+    Core.exp(newLogLum, newLum)
+
+    // 8. Color ratio: newLum / lum, with saturation control
+    val ratio = Mat()
+    Core.divide(newLum, lum, ratio)
+
+    // Saturation: pow(ratio, 1-sat) desaturates less when ratio varies
+    Core.pow(ratio, (1.0 - saturationWeight * 0.3).toDouble(), ratio)
+
+    val channels = mutableListOf<Mat>()
+    Core.split(hdr32f, channels)
+    for (ch in channels) {
+        Core.multiply(ch, ratio, ch)
+    }
+    Core.merge(channels, output)
+
+    // Apply gamma correction
+    val gammaInv = 1.0 / gamma.toDouble()
+    Core.pow(output, gammaInv, output)
+
+    hdrMat.release(); hdr32f.release(); lum.release()
+    logLum.release(); baseLog.release(); detailLog.release()
+    compressedBase.release(); boostedDetail.release()
+    newLogLum.release(); newLum.release(); ratio.release()
+    channels.forEach { it.release() }
+}
+
+// ── CLAHE Boost: Mertens + adaptive histogram equalization on luminance ──
+//
+// Uses Contrast Limited Adaptive Histogram Equalization on the luminance
+// channel of a Mertens fusion base. CLAHE enhances local contrast without
+// halo artifacts. surrealAmount blends between original and CLAHE output.
+
+private fun claheToneMap(
+    mats: List<Mat>, output: Mat,
+    surrealAmount: Float,
+    contrastWeight: Float, saturationWeight: Float, exposureWeight: Float
+) {
+    Log.d("HdrProcessor", "CLAHE Boost (surreal=$surrealAmount)")
+
+    // 1. Mertens exposure fusion → clean base
+    val base = Mat()
+    val merger = Photo.createMergeMertens(contrastWeight, saturationWeight, exposureWeight)
+    merger.process(mats, base)
+
+    // 2. Convert to 8-bit for CLAHE (CLAHE works on 8-bit integer)
+    val base8 = Mat()
+    base.convertTo(base8, CvType.CV_8UC3, 255.0)
+
+    // 3. Extract luminance → Lab L channel
+    val lab = Mat()
+    Imgproc.cvtColor(base8, lab, Imgproc.COLOR_RGB2Lab)
+    val labChannels = mutableListOf<Mat>()
+    Core.split(lab, labChannels)
+    val lOrig = labChannels[0].clone()
+
+    // 4. Apply CLAHE on L channel
+    val clahe = Imgproc.createCLAHE(2.0, Size(8.0, 8.0))
+    val lEnhanced = Mat()
+    clahe.apply(lOrig, lEnhanced)
+
+    // 5. Blend original and CLAHE-enhanced by surrealAmount
+    val lBlended = Mat()
+    Core.addWeighted(lOrig, (1.0 - surrealAmount).toDouble(),
+        lEnhanced, surrealAmount.toDouble(), 0.0, lBlended)
+
+    // 6. Merge back and convert to RGB
+    val resultChannels = listOf(lBlended, labChannels[1], labChannels[2])
+    Core.merge(resultChannels, lab)
+    val result = Mat()
+    Imgproc.cvtColor(lab, result, Imgproc.COLOR_Lab2RGB)
+
+    // 7. Convert back to float [0, 1] for consistent pipeline
+    result.convertTo(output, CvType.CV_32FC3, 1.0 / 255.0)
+
+    base.release(); base8.release(); lab.release()
+    lOrig.release(); lEnhanced.release(); lBlended.release()
+    result.release()
+    labChannels.forEach { it.release() }
 }
 
 // ── Alignment ─────────────────────────────────────────────────────────────
@@ -334,47 +637,19 @@ private fun cropValidRegion(mats: List<Mat>): List<Mat> {
     return mats.map { Mat(it, rect) }
 }
 
-// ── Ghosting Removal ──────────────────────────────────────────────────────
+// ── Ghost Artifact Reduction (post-process on tonemapped float output) ────
 
-private fun removeGhosting(mats: List<Mat>, strength: Float): List<Mat> {
-    if (mats.size < 2) return mats
-    Log.d("HdrProcessor", "Removing ghosting (strength=$strength)")
-    val refIdx = mats.size / 2
-    val refFloat = Mat()
-    mats[refIdx].convertTo(refFloat, CvType.CV_32F, 1.0 / 255.0)
-    val result = mutableListOf<Mat>()
-    mats.forEachIndexed { i, mat ->
-        if (i == refIdx) { result.add(mat.clone()); return@forEachIndexed }
-        val imgFloat = Mat()
-        mat.convertTo(imgFloat, CvType.CV_32F, 1.0 / 255.0)
-        val diff = Mat()
-        Core.absdiff(imgFloat, refFloat, diff)
-        val diffGray = Mat()
-        Imgproc.cvtColor(diff, diffGray, Imgproc.COLOR_RGB2GRAY)
-        val ghostMask = Mat()
-        Core.multiply(diffGray, Scalar(strength.toDouble()), ghostMask)
-        Imgproc.threshold(ghostMask, ghostMask, 1.0, 1.0, Imgproc.THRESH_TRUNC)
-        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0))
-        Imgproc.morphologyEx(ghostMask, ghostMask, Imgproc.MORPH_CLOSE, kernel)
-        val blended = Mat()
-        val ones = Mat.ones(ghostMask.size(), CvType.CV_32F)
-        val oneMinusMask = Mat()
-        Core.subtract(ones, ghostMask, oneMinusMask)
-        val cleanPart = Mat()
-        Core.multiply(imgFloat, oneMinusMask, cleanPart)
-        val refPart = Mat()
-        Core.multiply(refFloat, ghostMask, refPart)
-        Core.add(cleanPart, refPart, blended)
-        val result8 = Mat()
-        blended.convertTo(result8, CvType.CV_8UC3, 255.0)
-        result.add(result8)
-        ones.release()
-        imgFloat.release(); diff.release(); diffGray.release()
-        ghostMask.release(); blended.release(); cleanPart.release()
-        refPart.release(); oneMinusMask.release()
-    }
-    refFloat.release()
-    return result
+private fun reduceGhostArtifacts(rgb: Mat, output: Mat, strength: Float) {
+    Log.d("HdrProcessor", "Reducing ghost artifacts (strength=$strength)")
+
+    val kSize = (strength * 30.0 + 3.0).toInt() or 1
+    val blurred = Mat()
+    Imgproc.GaussianBlur(rgb, blurred, Size(kSize.toDouble(), kSize.toDouble()), 0.0)
+
+    val blend = (strength.toDouble() * 0.4).coerceAtMost(0.6)
+    Core.addWeighted(rgb, 1.0 - blend, blurred, blend, 0.0, output)
+
+    blurred.release()
 }
 
 // ── Fattal Gradient Domain Tone Mapping ──────────────────────────────────
@@ -461,7 +736,6 @@ private fun fattalToneMap(
     Core.merge(channels, output)
     channels.forEach { it.release() }
 
-    // Cleanup
     lum.release(); logLum.release(); recon.release()
     outLum.release(); invLum.release(); ratio.release()
     gPyr.forEach { it.release() }; lPyr.forEach { it.release() }
@@ -479,12 +753,10 @@ private fun icam06ToneMap(
     val rows = rgb32f.rows()
     val cols = rgb32f.cols()
 
-    // RGB → XYZ conversion (sRGB D65)
     val channels = mutableListOf<Mat>()
     Core.split(rgb32f, channels)
     val r = channels[0]; val g = channels[1]; val b = channels[2]
 
-    // Pre-allocate X, Y, Z as single-channel CV_32F (matching r/g/b from split)
     val X = Mat.zeros(rows, cols, CvType.CV_32F)
     val Y = Mat.zeros(rows, cols, CvType.CV_32F)
     val Z = Mat.zeros(rows, cols, CvType.CV_32F)
@@ -501,19 +773,16 @@ private fun icam06ToneMap(
     Core.scaleAdd(g, 0.1191920, Z, Z)
     Core.scaleAdd(b, 0.9503041, Z, Z)
 
-    // Chromatic adaptation: blend X and Z toward Y
     val adaptedX = Mat()
     val adaptedZ = Mat()
     Core.addWeighted(X, chromAdaptStrength.toDouble(), Y, (1.0 - chromAdaptStrength), 0.0, adaptedX)
     Core.addWeighted(Z, chromAdaptStrength.toDouble(), Y, (1.0 - chromAdaptStrength), 0.0, adaptedZ)
 
-    // Local adaptation luminance — Gaussian blur of Y
     val localAdapt = Mat()
     val kSize = ((localAdaptKernel * 15.0).toInt() or 1).coerceAtLeast(3)
     Imgproc.GaussianBlur(Y, localAdapt, Size(kSize.toDouble(), kSize.toDouble()), 0.0)
     Core.add(localAdapt, Scalar(eps), localAdapt)
 
-    // Sigmoidal tone compression: Y_out = Y / (Y + localAdapt^0.7)
     val localPow = Mat()
     Core.pow(localAdapt, 0.7, localPow)
     val yDenom = Mat()
@@ -521,7 +790,6 @@ private fun icam06ToneMap(
     val yOut = Mat()
     Core.divide(Y, yDenom, yOut)
 
-    // Scale adapted X, Z proportionally
     val yRatio = Mat()
     Core.divide(yOut, Y, yRatio)
     val xOut = Mat()
@@ -529,13 +797,11 @@ private fun icam06ToneMap(
     Core.multiply(adaptedX, yRatio, xOut)
     Core.multiply(adaptedZ, yRatio, zOut)
 
-    // Color saturation boost
     Core.pow(yRatio, (1.0 - colorSat).toDouble(), yRatio)
     Core.multiply(xOut, yRatio, xOut)
     Core.multiply(yOut, yRatio, yOut)
     Core.multiply(zOut, yRatio, zOut)
 
-    // XYZ → RGB — pre-allocate as single-channel CV_32F
     val outR = Mat.zeros(rows, cols, CvType.CV_32F)
     val outG = Mat.zeros(rows, cols, CvType.CV_32F)
     val outB = Mat.zeros(rows, cols, CvType.CV_32F)
@@ -552,7 +818,6 @@ private fun icam06ToneMap(
     Core.scaleAdd(yOut, -0.2040259, outB, outB)
     Core.scaleAdd(zOut, 1.0572252, outB, outB)
 
-    // Clamp to [0,1]
     for (c in listOf(outR, outG, outB)) {
         Core.max(c, Scalar(0.0), c)
         Core.min(c, Scalar(1.0), c)

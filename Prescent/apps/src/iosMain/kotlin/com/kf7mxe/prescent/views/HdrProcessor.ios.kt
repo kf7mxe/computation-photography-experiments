@@ -20,5 +20,6 @@ actual suspend fun processHdr(
     fattalColorSaturation: Float,
     icam06ChromaticAdaptation: Float,
     icam06LocalAdaptation: Float,
+    surrealAmount: Float,
     maxSize: Int
 ): String? = null
