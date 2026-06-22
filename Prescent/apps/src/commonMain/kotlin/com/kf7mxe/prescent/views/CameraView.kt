@@ -25,5 +25,11 @@ expect fun ElementWriter.cameraView(
     // Photo Sphere — fires live (azimuth, pitch) updates for guidance overlay
     onSphereOrientationUpdate: ((Pair<Float, Float>) -> Unit)? = null,
     // Photo Sphere — fires with the orientation of each captured frame
-    onSphereFrameOrientation: ((Float, Float) -> Unit)? = null
+    onSphereFrameOrientation: ((Float, Float) -> Unit)? = null,
+    // Photo Sphere — grid coverage state for overlay rendering
+    sphereGridData: Signal<List<List<Boolean>>> = Signal(emptyList()),
+    // Photo Sphere — current cell (row, col) being pointed at, or null
+    sphereCurrentCell: Signal<Pair<Int, Int>?> = Signal(null),
+    // Photo Sphere — map of "row,col" → captured image file path for ghost preview
+    sphereCellImages: Signal<Map<String, String>> = Signal(emptyMap())
 )

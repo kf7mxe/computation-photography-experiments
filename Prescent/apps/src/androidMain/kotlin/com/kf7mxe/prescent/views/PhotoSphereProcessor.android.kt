@@ -49,7 +49,7 @@ actual suspend fun processPhotoSphere(
             }
             val bitmap = BitmapFactory.decodeFile(path, opts) ?: return null
             val rgba = Mat(); Utils.bitmapToMat(bitmap, rgba); bitmap.recycle()
-            val rgb = Mat(); Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB); rgba.release()
+            val rgb = Mat(); Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_BGRA2BGR); rgba.release()
             return rgb
         }
 
@@ -187,7 +187,7 @@ private fun processSphereOrientations(
     val rgbResult = Mat(eqH, eqW, CvType.CV_8UC3)
     result.convertTo(rgbResult, CvType.CV_8UC3, 1.0)
     val rgbaResult = Mat()
-    Imgproc.cvtColor(rgbResult, rgbaResult, Imgproc.COLOR_RGB2RGBA)
+    Imgproc.cvtColor(rgbResult, rgbaResult, Imgproc.COLOR_BGR2RGBA)
     rgbResult.release(); result.release()
 
     val bitmap = Bitmap.createBitmap(rgbaResult.cols(), rgbaResult.rows(), Bitmap.Config.ARGB_8888)
@@ -378,7 +378,7 @@ private fun processHomographyFallback(mats: List<Mat>, isPreview: Boolean): Stri
 
     // Crop black borders
     val grayPano = Mat()
-    Imgproc.cvtColor(panorama, grayPano, Imgproc.COLOR_RGB2GRAY)
+    Imgproc.cvtColor(panorama, grayPano, Imgproc.COLOR_BGR2GRAY)
     val panoRows = grayPano.rows(); val panoCols = grayPano.cols()
 
     var top = 0; var bottom = panoRows - 1

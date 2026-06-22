@@ -42,7 +42,7 @@ actual suspend fun processSpatial(
             }
             val bitmap = BitmapFactory.decodeFile(path, opts) ?: return null
             val rgba = Mat(); Utils.bitmapToMat(bitmap, rgba); bitmap.recycle()
-            val rgb = Mat(); Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB); rgba.release()
+            val rgb = Mat(); Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_BGRA2BGR); rgba.release()
             return rgb
         }
 
@@ -131,8 +131,8 @@ actual suspend fun processSpatial(
         // ── Depth map (uses aligned images) ──────────────────────────────
         val depthColor = if (usedHomography) {
             try {
-                val grayL = Mat(); Imgproc.cvtColor(rectLeft, grayL, Imgproc.COLOR_RGB2GRAY)
-                val grayR = Mat(); Imgproc.cvtColor(rectRight, grayR, Imgproc.COLOR_RGB2GRAY)
+                val grayL = Mat(); Imgproc.cvtColor(rectLeft, grayL, Imgproc.COLOR_BGR2GRAY)
+                val grayR = Mat(); Imgproc.cvtColor(rectRight, grayR, Imgproc.COLOR_BGR2GRAY)
                 val disparity = Mat()
                 val sgbm = org.opencv.calib3d.StereoSGBM.create(0, 64, 5)
                 sgbm.setMinDisparity(0); sgbm.setNumDisparities(64); sgbm.setBlockSize(5)

@@ -24,7 +24,10 @@ actual fun ElementWriter.cameraView(
     spatialCaptureTrigger: Signal<Int>,
     onSpatialCaptured: ((List<String>) -> Unit)?,
     onSphereOrientationUpdate: ((Pair<Float, Float>) -> Unit)?,
-    onSphereFrameOrientation: ((Float, Float) -> Unit)?
+    onSphereFrameOrientation: ((Float, Float) -> Unit)?,
+    sphereGridData: Signal<List<List<Boolean>>>,
+    sphereCurrentCell: Signal<Pair<Int, Int>?>,
+    sphereCellImages: Signal<Map<String, String>>
 ) {
     text("Camera View (iOS — coming soon)")
 }

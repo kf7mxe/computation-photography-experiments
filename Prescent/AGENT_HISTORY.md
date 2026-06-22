@@ -372,3 +372,109 @@ Parameters repurposed: `fattalAlpha` → Detail Radius (blur kernel size), `fatt
 **Files changed:**
 - `apps/src/androidMain/.../views/HdrProcessor.android.kt` — Rewrote `hybridToneMap()` (unsharp mask on Reinhard luminance), rewrote `contrastOptimizer()` (unsharp mask on Mertens luminance). Added `durandToneMap()` (bilateral filter base/detail decomposition with log-luminance). Added `claheToneMap()` (Mertens + CLAHE on Lab L channel). Updated main dispatch for 4 algorithm cases.
 - `apps/src/commonMain/.../views/HdrProcessingPage.kt` — Added "Durand" and "CLAHE Boost" to algorithms list. Added UI sections for both with parameter sliders. Updated surreal slider condition for all 4 hybrid algorithms. Fixed Contrast Optimizer subtext and slider labels.
+
+### 2026-06-19 04:20
+
+**Session goal:** Fix Night Sight bugs — processing crash + preview abandonment.
+
+**Files changed:**
+
+- `apps/src/androidMain/.../views/NightSightProcessor.android.kt` — **Fixed `IndexOutOfBoundsException` crash**: When MTB alignment produces all-empty frames (silent failure), fall back to raw frames. Added guard before stacking to return `null` if `subtracted` is still empty.
+
+- `apps/src/androidMain/.../views/CameraView.android.kt` — **Fixed `BufferQueue has been abandoned`**: Added `OnAttachStateChangeListener` to `PreviewView` that calls `cameraProvider?.unbindAll()` when the view detaches from window.
+
+### 2026-06-19 20:00
+
+**Session goal:** Fix Night Sight processing crash — channel mismatch in temporal averaging.
+
+**Files changed:**
+
+- `apps/src/androidMain/.../views/NightSightProcessor.android.kt` — **Fixed `Sizes of input arguments do not match`**: `Mat.zeros(..., CvType.CV_32F)` created a 1-channel accumulator but frames are 3-channel RGB. Changed to `CvType.CV_32FC3` to match frame channel count.
+
+### 2026-06-19 20:30
+
+**Session goal:** Add multiple Night Sight algorithms with Lucky pre-filter combine option.
+
+**New files:**
+- `apps/src/commonMain/.../views/NightSightAlgorithm.kt` — Enum with 4 algorithms: Average, Median, Laplacian Pyramid, HDR Merge. Each has `label`, `description`, `supportsLuckyPreFilter` flag.
+
+**Files changed:**
+- `apps/src/commonMain/.../views/NightSightProcessor.kt` — Updated `expect` signature: added `algorithm`, `useLuckyPreFilter`, `luckyKeepFraction` params.
+
+- `apps/src/androidMain/.../views/NightSightProcessor.android.kt` — **Full rewrite**: Refactored into helper functions. New algorithms:
+  - **Median** (`stackMedianFrames`): Pads each frame's channel values into a column matrix, sorts each row, takes middle column — rejects outliers.
+  - **Laplacian Pyramid** (`stackLaplacianFrames`): Builds 4-level Laplacian pyramid per frame, averages at each level, reconstructs — preserves detail at all frequencies.
+  - **HDR Merge** (`stackHdrFrames`): Debevec calibration + merge, then Reinhard tone-map — handles varied exposure. Falls back to Average on failure.
+  - **Lucky pre-filter** (`luckySelect`): Computes Laplacian variance per frame, keeps top fraction by sharpness — removes motion-blurred frames.
+
+- `apps/src/androidMain/.../views/NightSightProcessor.android.kt` — Also fixed `Core.mean(lap).val[0]` → `` m.`val`[0] `` syntax (Kotlin `val` keyword conflict).
+
+- `apps/src/commonMain/.../views/NightSightPage.kt` — Added algorithm segmented button picker, Lucky pre-filter toggle + keep-fraction slider. Star trail mode restricted to Average algorithm. Algorithm description shown reactively.
+
+- `apps/src/iosMain/.../views/NightSightProcessor.ios.kt` — Updated stub with new params.
+- `apps/src/jsMain/.../views/NightSightProcessor.js.kt` — Updated stub with new params.
+
+### 2026-06-21 14:30
+
+**Session goal:** Implement Photo Sphere viewfinder overlay — grid overlay and ghost preview on camera preview.
+
+**Summary:** Added three new parameters to the `cameraView` expect/actual chain (`sphereGridData`, `sphereCurrentCell`, `sphereCellImages`) and implemented the visual overlay on Android.
+
+**Files changed:**
+
+- `apps/src/commonMain/kotlin/.../views/CameraView.kt` — Added 3 new expect parameter defaults: `sphereGridData: Signal<List<List<Boolean>>>`, `sphereCurrentCell: Signal<Pair<Int, Int>?>`, `sphereCellImages: Signal<Map<String, String>>`.
+
+- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — `PreviewView` now wrapped in a `FrameLayout` root. Added `GridOverlayView` (private View subclass) that draws colored rectangles: green (captured), dark (uncaptured), yellow (current cell). Added `ImageView` ghost preview at 40% opacity behind the grid — loads bitmap via `BitmapFactory.decodeFile` with `inSampleSize=4` for the current cell's captured image. Two reactive observers wire grid data and ghost image updates.
+
+- `apps/src/jsMain/kotlin/.../views/CameraView.js.kt` — Updated stub with new params.
+
+- `apps/src/iosMain/kotlin/.../views/CameraView.ios.kt` — Updated stub with new params.
+
+- `apps/src/commonMain/kotlin/.../views/CameraPage.kt` — Added `sphereCellImages` Signal (maps "row,col" → file path), `pendingSphereCells` queue, `sphereCurrentCell` Signal derived from `orientationToCell`. `onSphereFrameOrientation` pushes cell to queue. `onImagesCaptured` pops from queue and stores path in map. State cleared when exiting sphere mode. New signals passed to `cameraView`.
+
+### 2026-06-21 14:45
+
+**Session goal:** Remove grid overlay, keep only ghost preview for Photo Sphere.
+
+**Summary:** Removed the colored-rectangle `GridOverlayView` from the camera preview. Ghost preview (40% opacity translucent image of previously captured cell) now only shows when the phone is pointed at a position that already has a captured frame — matching the Pixel Photo Sphere ghost behavior.
+
+**Files changed:**
+- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — Removed `GridOverlayView` class, removed `gridOverlay` from the `FrameLayout` stack, removed grid overlay reactive observer, removed unused `Canvas`/`Paint` imports. Ghost `ImageView` remains as the only overlay layer on top of `PreviewView`. Ghost naturally only activates in sphere mode because `sphereCellImages` is cleared on mode exit.
+
+### 2026-06-21 15:00
+
+**Session goal:** Fix phone rotation resetting to home page and captured images showing in wrong orientation.
+
+**Root cause #1:** Android activity recreates on configuration change (rotation) by default. The `MainActivity` manifest entry lacked `android:configChanges`, causing the entire activity stack (including navigation state) to reset on rotation.
+
+**Root cause #2:** CameraX `ImageCapture.Builder` and `Preview.Builder` were not configured with `setTargetRotation()`. Without this, images are captured in the sensor's native orientation (landscape for most rear cameras) without setting the EXIF rotation tag. The preview also stays in sensor orientation regardless of device orientation.
+
+**Files changed:**
+- `apps/src/androidMain/AndroidManifest.xml` — Added `android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"` to the `<activity>` tag so Android doesn't recreate the activity on rotation.
+- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — Added `setTargetRotation(displayRotation)` to both `Preview.Builder` and `ImageCapture.Builder` in `startCamera()`. Rotation is obtained from the current display's rotation via `WindowManager`. Added `android.view.Surface` import for rotation constants.
+
+### 2026-06-21 15:30
+
+**Session goal:** Fix Photo Sphere orientation calculation when phone is in portrait mode.
+
+**Root cause:** The rotation vector sensor's `getOrientation()` returns azimuth/pitch in the device's natural coordinate frame. When the display is rotated (e.g., portrait → landscape), `setTargetRotation` correctly rotates the camera output, but the sensor orientation values were not adjusted for the display rotation. This caused the grid cell mapping to think the phone was in a different orientation than it actually was.
+
+**Fix:** Added `SensorManager.remapCoordinateSystem()` to remap the rotation matrix to the display's coordinate frame before extracting orientation values. The axis remapping constants match Android's standard display rotation mapping: ROTATION_90 uses (AXIS_MINUS_Y, AXIS_X), ROTATION_180 uses (AXIS_MINUS_X, AXIS_MINUS_Y), ROTATION_270 uses (AXIS_Y, AXIS_MINUS_X). The display rotation is obtained fresh on each sensor event via `WindowManager.defaultDisplay.rotation`. A `remappedR` float array is pre-allocated to avoid GC pressure on the sensor callback.
+
+**Files changed:**
+- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — Updated `onSensorChanged` to fetch display rotation, compute axis remapping, call `remapCoordinateSystem`, then `getOrientation` on the remapped matrix.
+
+### 2026-06-21 16:00
+
+**Session goal:** Fix Photo Sphere orientation calculation so ghost preview appears at the correct phone tilt.
+
+**Root cause:** `SensorManager.getOrientation()` computes pitch relative to the device being flat on a table (0° = screen up). For a photo sphere we need the camera's elevation relative to the horizon (0° = camera level). These reference frames differ by ~90° and the sign depends on tilt direction, causing the ghost preview to activate at the wrong tilt angle.
+
+**Fix:** Replaced `getOrientation()` with direct computation of camera direction from the rotation matrix. The camera points in the -Z direction of the device. The rotation matrix R maps device→world (East, North, Sky). Camera direction = (-R[0][2], -R[1][2], -R[2][2]). Azimuth = atan2(East, North), elevation = asin(-R[2][2]). This gives elevation = 0° at horizon, positive = looking up, negative = looking down — matching the photo sphere grid's expected reference frame.
+
+Removed the `remapCoordinateSystem` since it's unnecessary when computing camera direction directly in the world frame.
+
+Renamed `currentPitch` → `currentElevation` to reflect the corrected meaning.
+
+**Files changed:**
+- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — Sensor callback now computes azimuth and elevation directly from rotation matrix elements instead of using `getOrientation()`. Removed `remapCoordinateSystem` and `remappedR`.

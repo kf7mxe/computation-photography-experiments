@@ -12,6 +12,7 @@ import com.lightningkite.reactive.context.reactive
 import com.lightningkite.reactive.core.Constant
 import com.lightningkite.reactive.core.Reactive
 import com.lightningkite.reactive.core.Signal
+import com.lightningkite.reactive.extensions.equalTo
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -19,6 +20,9 @@ import kotlinx.coroutines.launch
 class NightSightPage(val frames: List<String> = listOf()) : Page, FullscreenPage {
     override val title: Reactive<String> get() = Constant("Night Sight")
 
+    val nsAlgorithm = Signal(NightSightAlgorithm.AVERAGE)
+    val useLucky = Signal(false)
+    val luckyFraction = Signal(0.6f)
     val starTrail = Signal(false)
     val brightnessBoost = Signal(1.5f)
     val isProcessing = Signal(false)
@@ -53,7 +57,42 @@ class NightSightPage(val frames: List<String> = listOf()) : Page, FullscreenPage
                     }
                 }
 
-                // ── Settings ──────────────────────────────────────────────
+                // ── Algorithm Selection ──────────────────────────────────
+                card.padded.col {
+                    h2 { content = "Algorithm" }
+                    scrolling.row {
+                        NightSightAlgorithm.entries.forEach { algo ->
+                            toggleButton {
+                                text(algo.label)
+                                checked bind nsAlgorithm.equalTo(algo)
+                            }
+                        }
+                    }
+                    text { ::content { nsAlgorithm().description } }
+                }
+
+                // ── Lucky Pre-filter ─────────────────────────────────────
+                reactive {
+                    val algo = nsAlgorithm()
+                    if (algo.supportsLuckyPreFilter) {
+                        card.padded.col {
+                            h2 { content = "Combine: Lucky Frame Selection" }
+                            text("Selects sharpest frames before stacking — removes motion blur")
+                            row {
+                                text("Enable")
+                                switch { checked bind useLucky }
+                            }
+                            shownWhen { useLucky() }.col {
+                                text { ::content { "Keep sharpest ${(luckyFraction() * 100).toInt()}% of frames" } }
+                                slider { range(0.2f, 1.0f, 0.05f); value.bind(luckyFraction) }
+                            }
+                        }
+                    } else {
+                        useLucky.value = false
+                    }
+                }
+
+                // ── Stack Settings ──────────────────────────────────────
                 card.padded.col {
                     h2 { content = "Stack Settings" }
 
@@ -61,9 +100,14 @@ class NightSightPage(val frames: List<String> = listOf()) : Page, FullscreenPage
                         text { ::content { "Brightness Boost: ${brightnessBoost().fmt()}x" } }
                         slider { range(0.5f, 4.0f, 0.25f); value.bind(brightnessBoost) }
                     }
-                    row {
-                        text("Star Trail Mode")
-                        switch { checked bind starTrail }
+
+                    reactive {
+                        val algo = nsAlgorithm()
+                        shownWhen { algo == NightSightAlgorithm.AVERAGE }.row {
+                            text("Star Trail Mode")
+                            switch { checked bind starTrail }
+                        }
+                        if (algo != NightSightAlgorithm.AVERAGE) starTrail.value = false
                     }
                 }
 
@@ -117,6 +161,9 @@ class NightSightPage(val frames: List<String> = listOf()) : Page, FullscreenPage
 
             // Auto-preview on settings change
             reactive {
+                nsAlgorithm()
+                useLucky()
+                luckyFraction()
                 starTrail()
                 brightnessBoost()
 
@@ -137,6 +184,9 @@ class NightSightPage(val frames: List<String> = listOf()) : Page, FullscreenPage
         try {
             val result = processNightSight(
                 frames,
+                algorithm = nsAlgorithm.value,
+                useLuckyPreFilter = useLucky.value && nsAlgorithm.value.supportsLuckyPreFilter,
+                luckyKeepFraction = luckyFraction.value,
                 starTrail = starTrail.value,
                 darkFramePath = null,
                 brightnessBoost = brightnessBoost.value,

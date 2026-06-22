@@ -1,10 +1,10 @@
 package com.kf7mxe.prescent.views
 
-import com.lightningkite.kiteui.views.ElementWriter
-import com.lightningkite.reactive.core.Signal
-
 expect suspend fun processNightSight(
     images: List<String>,
+    algorithm: NightSightAlgorithm = NightSightAlgorithm.AVERAGE,
+    useLuckyPreFilter: Boolean = false,
+    luckyKeepFraction: Float = 0.6f,
     starTrail: Boolean = false,
     darkFramePath: String? = null,
     brightnessBoost: Float = 1.5f,

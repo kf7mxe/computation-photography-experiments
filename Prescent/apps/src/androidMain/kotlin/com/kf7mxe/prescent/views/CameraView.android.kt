@@ -12,8 +12,15 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.util.Log
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
+import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.ImageView
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
@@ -50,22 +57,53 @@ actual fun ElementWriter.cameraView(
     spatialCaptureTrigger: Signal<Int>,
     onSpatialCaptured: ((List<String>) -> Unit)?,
     onSphereOrientationUpdate: ((Pair<Float, Float>) -> Unit)?,
-    onSphereFrameOrientation: ((Float, Float) -> Unit)?
+    onSphereFrameOrientation: ((Float, Float) -> Unit)?,
+    sphereGridData: Signal<List<List<Boolean>>>,
+    sphereCurrentCell: Signal<Pair<Int, Int>?>,
+    sphereCellImages: Signal<Map<String, String>>
 ) {
     val androidContext = AndroidAppContext.applicationCtx
     val mainExecutor = ContextCompat.getMainExecutor(androidContext)
     val singleExecutor = Executors.newSingleThreadExecutor()
+
+    var cameraProvider: ProcessCameraProvider? = null
 
     val previewView = PreviewView(androidContext).apply {
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         )
+        addOnAttachStateChangeListener(object : android.view.View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: android.view.View) {}
+            override fun onViewDetachedFromWindow(v: android.view.View) {
+                Log.d("CameraView", "PreviewView detached, unbinding camera")
+                cameraProvider?.unbindAll()
+            }
+        })
+    }
+
+    val ghostImageView = ImageView(androidContext).apply {
+        layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        alpha = 0.4f
+        visibility = View.GONE
+    }
+
+    val rootLayout = FrameLayout(androidContext).apply {
+        layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        addView(previewView)
+        addView(ghostImageView)
     }
 
     val kiteContext = (this as ViewWriter).context
     val element = object : NativeElement(kiteContext) {
-        override val native: View = previewView
+        override val native: View = rootLayout
     }
     this.write(element) {}
 
@@ -80,20 +118,24 @@ actual fun ElementWriter.cameraView(
 
     // ── Rotation sensor for Photo Sphere guidance ───────────────────────
     var currentAzimuth = 0f
-    var currentPitch = 0f
+    var currentElevation = 0f
     try {
         val sensorManager = androidContext.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         val rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
         if (rotationSensor != null) {
             sensorManager.registerListener(object : SensorEventListener {
-                val rotationMatrix = FloatArray(9)
-                val orientation = FloatArray(3)
+                val R = FloatArray(9)
                 override fun onSensorChanged(event: SensorEvent) {
-                    SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
-                    SensorManager.getOrientation(rotationMatrix, orientation)
-                    currentAzimuth = Math.toDegrees(orientation[0].toDouble()).toFloat()
-                    currentPitch = Math.toDegrees(orientation[1].toDouble()).toFloat()
-                    onSphereOrientationUpdate?.invoke(currentAzimuth to currentPitch)
+                    SensorManager.getRotationMatrixFromVector(R, event.values)
+                    // Camera points in -Z direction of device.
+                    // Rotation matrix R maps device→world (East, North, Sky).
+                    // Camera direction in world = -R * [0,0,1] = (-R[0][2], -R[1][2], -R[2][2])
+                    val camUp = -R[8].toDouble()   // -R[2][2] – vertical component
+                    val camEast = -R[2].toDouble()  // -R[0][2] – easting
+                    val camNorth = -R[5].toDouble() // -R[1][2] – northing
+                    currentAzimuth = Math.toDegrees(Math.atan2(camEast, camNorth)).toFloat()
+                    currentElevation = Math.toDegrees(Math.asin(camUp)).toFloat()
+                    onSphereOrientationUpdate?.invoke(currentAzimuth to currentElevation)
                 }
                 override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
             }, rotationSensor, SensorManager.SENSOR_DELAY_GAME)
@@ -221,7 +263,6 @@ actual fun ElementWriter.cameraView(
     }
     discoverLenses()
 
-    var cameraProvider: ProcessCameraProvider? = null
     var imageCapture: ImageCapture? = null
     var currentCamera: Camera? = null
 
@@ -233,6 +274,10 @@ actual fun ElementWriter.cameraView(
 
         val previewBuilder = Preview.Builder()
         val imageCaptureBuilder = ImageCapture.Builder()
+
+        val displayRotation = AndroidAppContext.activityCtx?.windowManager?.defaultDisplay?.rotation ?: Surface.ROTATION_0
+        previewBuilder.setTargetRotation(displayRotation)
+        imageCaptureBuilder.setTargetRotation(displayRotation)
 
         // For physical cameras, set the physical camera ID via Camera2Interop
         if (entry.isPhysical && entry.physicalCameraId != null) {
@@ -285,7 +330,7 @@ actual fun ElementWriter.cameraView(
 
     fun captureSingleShot() {
         Log.d("CameraView", "captureSingleShot")
-        onSphereFrameOrientation?.invoke(currentAzimuth, currentPitch)
+        onSphereFrameOrientation?.invoke(currentAzimuth, currentElevation)
         val ic = imageCapture ?: return
         val captureDir = File(androidContext.filesDir, "captures/${System.currentTimeMillis()}").also { it.mkdirs() }
         val file = File(captureDir, "shot.jpg")
@@ -556,6 +601,55 @@ actual fun ElementWriter.cameraView(
             captureSpatialPair { frames ->
                 onSpatialCaptured?.invoke(frames)
             }
+        }
+    }
+
+    // ── Sphere ghost preview ────────────────────────────────────────────
+    reactive {
+        val images = sphereCellImages()
+        val cell = sphereCurrentCell()
+        val key = if (cell != null) "${cell.first},${cell.second}" else null
+        val path = if (key != null) images[key] else null
+        if (path != null) {
+            try {
+                val opts = BitmapFactory.Options().apply { inSampleSize = 4 }
+                val bmp = BitmapFactory.decodeFile(path, opts)
+                if (bmp != null) {
+                    val exif = ExifInterface(path)
+                    val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                    val rotated = when (orientation) {
+                        ExifInterface.ORIENTATION_ROTATE_90 -> {
+                            val m = Matrix().apply { postRotate(90f) }
+                            val r = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                            if (r != bmp) bmp.recycle()
+                            r
+                        }
+                        ExifInterface.ORIENTATION_ROTATE_180 -> {
+                            val m = Matrix().apply { postRotate(180f) }
+                            val r = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                            if (r != bmp) bmp.recycle()
+                            r
+                        }
+                        ExifInterface.ORIENTATION_ROTATE_270 -> {
+                            val m = Matrix().apply { postRotate(270f) }
+                            val r = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                            if (r != bmp) bmp.recycle()
+                            r
+                        }
+                        else -> bmp
+                    }
+                    ghostImageView.setImageBitmap(rotated)
+                    ghostImageView.visibility = View.VISIBLE
+                } else {
+                    ghostImageView.visibility = View.GONE
+                }
+            } catch (e: Exception) {
+                Log.e("CameraView", "Ghost preview decode failed", e)
+                ghostImageView.visibility = View.GONE
+            }
+        } else {
+            ghostImageView.setImageBitmap(null)
+            ghostImageView.visibility = View.GONE
         }
     }
 }

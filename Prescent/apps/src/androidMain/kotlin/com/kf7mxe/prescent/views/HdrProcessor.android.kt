@@ -192,13 +192,10 @@ actual suspend fun processHdr(
         val final8bit = Mat()
         finalFloat.convertTo(final8bit, CvType.CV_8UC3, 255.0)
         finalFloat.release()
-        val rgbFinal = Mat()
-        Imgproc.cvtColor(final8bit, rgbFinal, Imgproc.COLOR_BGR2RGB)
-        final8bit.release()
 
-        val resultBitmap = Bitmap.createBitmap(rgbFinal.cols(), rgbFinal.rows(), Bitmap.Config.ARGB_8888)
-        Utils.matToBitmap(rgbFinal, resultBitmap)
-        rgbFinal.release()
+        val resultBitmap = Bitmap.createBitmap(final8bit.cols(), final8bit.rows(), Bitmap.Config.ARGB_8888)
+        Utils.matToBitmap(final8bit, resultBitmap)
+        final8bit.release()
 
         val savedPath = if (isPreview) {
             val previewFile = File(context.cacheDir, "hdr_preview_${System.currentTimeMillis()}.jpg")

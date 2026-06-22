@@ -141,6 +141,9 @@ android {
     packaging {
         resources.excludes.add("com/lightningkite/lightningserver/lightningdb.txt")
         resources.excludes.add("com/lightningkite/lightningserver/lightningdb-log.txt")
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 
     compileOptions {
