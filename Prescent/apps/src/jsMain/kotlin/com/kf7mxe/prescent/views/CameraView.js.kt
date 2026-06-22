@@ -27,7 +27,7 @@ actual fun ElementWriter.cameraView(
     onSphereFrameOrientation: ((Float, Float) -> Unit)?,
     sphereGridData: Signal<List<List<Boolean>>>,
     sphereCurrentCell: Signal<Pair<Int, Int>?>,
-    sphereCellImages: Signal<Map<String, String>>
+    sphereGhostFrames: Signal<List<SphereGhostFrame>>
 ) {
     text("Camera not available in browser")
 }

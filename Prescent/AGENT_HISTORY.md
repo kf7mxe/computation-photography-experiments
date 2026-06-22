@@ -478,3 +478,28 @@ Renamed `currentPitch` → `currentElevation` to reflect the corrected meaning.
 
 **Files changed:**
 - `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — Sensor callback now computes azimuth and elevation directly from rotation matrix elements instead of using `getOrientation()`. Removed `remapCoordinateSystem` and `remappedR`.
+
+### 2026-06-21 16:30
+
+**Session goal:** Replace flat ghost preview with positional green ghost — shows each captured frame at the correct screen position based on angular offset from current view.
+
+**Summary:** Completely redesigned the sphere ghost overlay. Instead of a single translucent ImageView showing the full captured image at 40% opacity, the overlay now:
+- Shows each captured frame at its correct angular position relative to current view
+- Each frame is drawn at screen coordinates derived from (azimuth, pitch) offset
+- Frame only shows when the current view overlaps with the frame's angular position
+- As you pan, frames slide in/out of view naturally
+- Frames are tinted green (semi-transparent `0x6600FF00` overlay) instead of white/gray
+- Frames are pre-rotated per EXIF orientation for correct portrait preview
+
+**Data model changes:**
+- `sphereCellImages: Signal<Map<String, String>>` → `sphereGhostFrames: Signal<List<SphereGhostFrame>>` where `SphereGhostFrame(azimuth, pitch, path)` carries the actual capture orientation
+- `pendingSphereCells` → `pendingSphereCaptures` to store orientation alongside cell information, ensuring correct path→orientation pairing even during rapid captures
+
+**Files changed:**
+- `apps/src/commonMain/kotlin/.../views/CameraPage.kt` — Added top-level `SphereGhostFrame` data class. Replaced `sphereCellImages`/`pendingSphereCells` with `sphereGhostFrames`/`pendingSphereCaptures`. `PendingSphereCapture` stores both the grid cell and the exact azimuth/pitch at capture time.* `onImagesCaptured` now builds `SphereGhostFrame` entries from pending captures. Sphere state reset clears both lists.
+- `apps/src/commonMain/kotlin/.../views/CameraView.kt` — `sphereCellImages` replaced with `sphereGhostFrames: Signal<List<SphereGhostFrame>>` in expect declaration.
+
+- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — Replaced ghost `ImageView` with `GhostOverlayView`: custom `View` subclass that draws each captured frame as a green-tinted bitmap at the correct screen position. Screen position is computed from angular offset normalized by FOV constants (55° horizontal × 40° vertical in landscape, swapped for portrait). Frames outside viewport are skipped. EXIF-aware bitmap loading with `inSampleSize=4` for performance. Bitmap cache per path. Sensor callback feeds `(frames, curAz, curElev, displayRot)` to the overlay on every sensor event. Reactive observer syncs `lastGhostFrames` from `sphereGhostFrames` signal. FOV auto-swaps based on display rotation.
+
+- `apps/src/jsMain/kotlin/.../views/CameraView.js.kt` — Updated stub signature.
+- `apps/src/iosMain/kotlin/.../views/CameraView.ios.kt` — Updated stub signature.

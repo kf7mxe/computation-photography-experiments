@@ -14,13 +14,16 @@ import android.hardware.camera2.CaptureRequest
 import android.util.Log
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.RectF
 import android.media.ExifInterface
 import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
-import android.widget.ImageView
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
@@ -35,6 +38,7 @@ import com.lightningkite.reactive.core.Signal
 import com.lightningkite.reactive.context.reactive
 import java.io.File
 import java.util.concurrent.Executors
+import kotlin.math.abs
 
 @SuppressLint("UnsafeOptInUsageError")
 actual fun ElementWriter.cameraView(
@@ -60,7 +64,7 @@ actual fun ElementWriter.cameraView(
     onSphereFrameOrientation: ((Float, Float) -> Unit)?,
     sphereGridData: Signal<List<List<Boolean>>>,
     sphereCurrentCell: Signal<Pair<Int, Int>?>,
-    sphereCellImages: Signal<Map<String, String>>
+    sphereGhostFrames: Signal<List<SphereGhostFrame>>
 ) {
     val androidContext = AndroidAppContext.applicationCtx
     val mainExecutor = ContextCompat.getMainExecutor(androidContext)
@@ -82,14 +86,11 @@ actual fun ElementWriter.cameraView(
         })
     }
 
-    val ghostImageView = ImageView(androidContext).apply {
+    val ghostOverlay = GhostOverlayView(androidContext).apply {
         layoutParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         )
-        scaleType = ImageView.ScaleType.FIT_CENTER
-        alpha = 0.4f
-        visibility = View.GONE
     }
 
     val rootLayout = FrameLayout(androidContext).apply {
@@ -98,7 +99,7 @@ actual fun ElementWriter.cameraView(
             ViewGroup.LayoutParams.MATCH_PARENT
         )
         addView(previewView)
-        addView(ghostImageView)
+        addView(ghostOverlay)
     }
 
     val kiteContext = (this as ViewWriter).context
@@ -119,6 +120,8 @@ actual fun ElementWriter.cameraView(
     // ── Rotation sensor for Photo Sphere guidance ───────────────────────
     var currentAzimuth = 0f
     var currentElevation = 0f
+    var lastGhostFrames: List<SphereGhostFrame> = emptyList()
+    val display = androidContext.getSystemService(Context.WINDOW_SERVICE).let { (it as android.view.WindowManager).defaultDisplay }
     try {
         val sensorManager = androidContext.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         val rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
@@ -127,15 +130,13 @@ actual fun ElementWriter.cameraView(
                 val R = FloatArray(9)
                 override fun onSensorChanged(event: SensorEvent) {
                     SensorManager.getRotationMatrixFromVector(R, event.values)
-                    // Camera points in -Z direction of device.
-                    // Rotation matrix R maps device→world (East, North, Sky).
-                    // Camera direction in world = -R * [0,0,1] = (-R[0][2], -R[1][2], -R[2][2])
-                    val camUp = -R[8].toDouble()   // -R[2][2] – vertical component
-                    val camEast = -R[2].toDouble()  // -R[0][2] – easting
-                    val camNorth = -R[5].toDouble() // -R[1][2] – northing
+                    val camUp = -R[8].toDouble()
+                    val camEast = -R[2].toDouble()
+                    val camNorth = -R[5].toDouble()
                     currentAzimuth = Math.toDegrees(Math.atan2(camEast, camNorth)).toFloat()
                     currentElevation = Math.toDegrees(Math.asin(camUp)).toFloat()
                     onSphereOrientationUpdate?.invoke(currentAzimuth to currentElevation)
+                    ghostOverlay.update(lastGhostFrames, currentAzimuth, currentElevation, display.rotation)
                 }
                 override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
             }, rotationSensor, SensorManager.SENSOR_DELAY_GAME)
@@ -536,7 +537,6 @@ actual fun ElementWriter.cameraView(
                             Log.d("CameraView", "Spatial pair complete: $capturedFiles")
                             callback(capturedFiles)
                         } else {
-                            // Same lens — small delay for natural hand movement
                             singleExecutor.execute {
                                 Thread.sleep(300)
                                 mainExecutor.execute { captureShot() }
@@ -547,6 +547,12 @@ actual fun ElementWriter.cameraView(
             )
         }
         captureShot()
+    }
+
+    // ── Sphere ghost frames sync & overlay update ───────────────────────
+    reactive {
+        lastGhostFrames = sphereGhostFrames()
+        ghostOverlay.update(lastGhostFrames, currentAzimuth, currentElevation, display.rotation)
     }
 
     // ── Shutter trigger observer ────────────────────────────────────────
@@ -603,53 +609,99 @@ actual fun ElementWriter.cameraView(
             }
         }
     }
+}
 
-    // ── Sphere ghost preview ────────────────────────────────────────────
-    reactive {
-        val images = sphereCellImages()
-        val cell = sphereCurrentCell()
-        val key = if (cell != null) "${cell.first},${cell.second}" else null
-        val path = if (key != null) images[key] else null
-        if (path != null) {
-            try {
-                val opts = BitmapFactory.Options().apply { inSampleSize = 4 }
-                val bmp = BitmapFactory.decodeFile(path, opts)
-                if (bmp != null) {
-                    val exif = ExifInterface(path)
-                    val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-                    val rotated = when (orientation) {
+private class GhostOverlayView(context: Context) : View(context) {
+    companion object {
+        var fovHorizontal: Float = 55f
+        var fovVertical: Float = 40f
+    }
+
+    init { setWillNotDraw(false) }
+
+    private var frames: List<SphereGhostFrame> = emptyList()
+    private var currentAzimuth: Float = 0f
+    private var currentPitch: Float = 0f
+    private var displayRotation: Int = Surface.ROTATION_0
+
+    private val bitmapCache = mutableMapOf<String, Bitmap?>()
+    private val ghostPaint = Paint().apply { isFilterBitmap = true; alpha = 90 }
+    private val tintPaint = Paint().apply { color = (0x4400AA00).toInt(); style = Paint.Style.FILL }
+
+    fun update(frames: List<SphereGhostFrame>, curAz: Float, curPitch: Float, displayRot: Int) {
+        this.frames = frames
+        this.currentAzimuth = curAz
+        this.currentPitch = curPitch
+        this.displayRotation = displayRot
+        if (frames.isEmpty()) bitmapCache.clear()
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        if (frames.isEmpty()) return
+
+        val w = width.toFloat()
+        val h = height.toFloat()
+
+        val fovH: Float
+        val fovV: Float
+        when (displayRotation) {
+            Surface.ROTATION_90, Surface.ROTATION_270 -> {
+                fovH = Companion.fovVertical
+                fovV = Companion.fovHorizontal
+            }
+            else -> {
+                fovH = Companion.fovHorizontal
+                fovV = Companion.fovVertical
+            }
+        }
+
+        for (frame in frames) {
+            var dAz = (frame.azimuth - currentAzimuth) % 360f
+            if (dAz < -180f) dAz += 360f
+            if (dAz >= 180f) dAz -= 360f
+            val dPitch = frame.pitch - currentPitch
+            if (abs(dAz) > fovH || abs(dPitch) > fovV) continue
+
+            val cx = w / 2f + (dAz / fovH) * w
+            val cy = h / 2f - (dPitch / fovV) * h
+
+            val fl = cx - w / 2f
+            val ft = cy - h / 2f
+            val fr = cx + w / 2f
+            val fb = cy + h / 2f
+
+            val bmp = bitmapCache.getOrPut(frame.path) {
+                try {
+                    val o = BitmapFactory.Options().apply { inSampleSize = 4 }
+                    val raw = BitmapFactory.decodeFile(frame.path, o) ?: return@getOrPut null
+                    val exif = ExifInterface(frame.path)
+                    val rot = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                    when (rot) {
                         ExifInterface.ORIENTATION_ROTATE_90 -> {
                             val m = Matrix().apply { postRotate(90f) }
-                            val r = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-                            if (r != bmp) bmp.recycle()
-                            r
+                            val r = Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
+                            if (r != raw) raw.recycle(); r
                         }
                         ExifInterface.ORIENTATION_ROTATE_180 -> {
                             val m = Matrix().apply { postRotate(180f) }
-                            val r = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-                            if (r != bmp) bmp.recycle()
-                            r
+                            val r = Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
+                            if (r != raw) raw.recycle(); r
                         }
                         ExifInterface.ORIENTATION_ROTATE_270 -> {
                             val m = Matrix().apply { postRotate(270f) }
-                            val r = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-                            if (r != bmp) bmp.recycle()
-                            r
+                            val r = Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
+                            if (r != raw) raw.recycle(); r
                         }
-                        else -> bmp
+                        else -> raw
                     }
-                    ghostImageView.setImageBitmap(rotated)
-                    ghostImageView.visibility = View.VISIBLE
-                } else {
-                    ghostImageView.visibility = View.GONE
-                }
-            } catch (e: Exception) {
-                Log.e("CameraView", "Ghost preview decode failed", e)
-                ghostImageView.visibility = View.GONE
+                } catch (e: Exception) { null }
             }
-        } else {
-            ghostImageView.setImageBitmap(null)
-            ghostImageView.visibility = View.GONE
+            if (bmp == null) continue
+
+            canvas.drawBitmap(bmp, Rect(0, 0, bmp.width, bmp.height), RectF(fl, ft, fr, fb), ghostPaint)
+            canvas.drawRect(fl, ft, fr, fb, tintPaint)
         }
     }
 }

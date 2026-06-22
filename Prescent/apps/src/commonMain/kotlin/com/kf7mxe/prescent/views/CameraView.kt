@@ -30,6 +30,6 @@ expect fun ElementWriter.cameraView(
     sphereGridData: Signal<List<List<Boolean>>> = Signal(emptyList()),
     // Photo Sphere — current cell (row, col) being pointed at, or null
     sphereCurrentCell: Signal<Pair<Int, Int>?> = Signal(null),
-    // Photo Sphere — map of "row,col" → captured image file path for ghost preview
-    sphereCellImages: Signal<Map<String, String>> = Signal(emptyMap())
+    // Photo Sphere — captured frames with orientations for ghost preview
+    sphereGhostFrames: Signal<List<SphereGhostFrame>> = Signal(emptyList())
 )

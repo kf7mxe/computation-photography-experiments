@@ -18,6 +18,8 @@ import com.lightningkite.reactive.extensions.equalTo
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
+data class SphereGhostFrame(val azimuth: Float, val pitch: Float, val path: String)
+
 class CameraPage : Page, FullscreenPage {
 
     val bracketCount = Signal(3)
@@ -42,8 +44,8 @@ class CameraPage : Page, FullscreenPage {
     val sphereOrientations = mutableListOf<Pair<Float, Float>>()
     val sphereCurrentOrientation = Signal(0f to 0f)
     var sphereRefAz: Float? = null
-    val sphereCellImages = Signal<Map<String, String>>(emptyMap())
-    private val pendingSphereCells = mutableListOf<GridCell>()
+    val sphereGhostFrames = Signal<List<SphereGhostFrame>>(emptyList())
+    private val pendingSphereCaptures = mutableListOf<PendingSphereCapture>()
     val sphereCurrentCell = Signal<Pair<Int, Int>?>(null)
 
     val captureMode = Signal("hdr")
@@ -59,6 +61,7 @@ class CameraPage : Page, FullscreenPage {
     }
 
     data class GridCell(val row: Int, val col: Int)
+    private data class PendingSphereCapture(val cell: GridCell, val azimuth: Float, val pitch: Float)
     fun orientationToCell(azimuth: Float, pitch: Float): GridCell? {
         val refAz = sphereRefAz ?: return null
         var dAz = (azimuth - refAz) % 360f
@@ -148,8 +151,8 @@ class CameraPage : Page, FullscreenPage {
                     sphereFrames.value = listOf()
                     sphereOrientations.clear()
                     sphereRefAz = null
-                    sphereCellImages.value = emptyMap()
-                    pendingSphereCells.clear()
+                    sphereGhostFrames.value = emptyList()
+                    pendingSphereCaptures.clear()
                     sphereCurrentCell.value = null
                 }
             }
@@ -162,9 +165,9 @@ class CameraPage : Page, FullscreenPage {
                             isHdrMode.value && paths.size > 1 -> GlobalNavigator.main.navigate(HdrProcessingPage(paths))
                             captureMode.value == "sphere" && paths.isNotEmpty() -> {
                                 sphereFrames.value = sphereFrames.value + paths
-                                val cell = pendingSphereCells.removeFirstOrNull()
-                                if (cell != null) {
-                                    sphereCellImages.value = sphereCellImages.value + ("${cell.row},${cell.col}" to paths.first())
+                                val pending = pendingSphereCaptures.removeFirstOrNull()
+                                if (pending != null) {
+                                    sphereGhostFrames.value = sphereGhostFrames.value + SphereGhostFrame(pending.azimuth, pending.pitch, paths.first())
                                 }
                             }
                         }
@@ -202,11 +205,11 @@ class CameraPage : Page, FullscreenPage {
                         sphereOrientations.add(az to pitch)
                         recomputeGrid()
                         val cell = orientationToCell(az, pitch)
-                        if (cell != null) pendingSphereCells.add(cell)
+                        if (cell != null) pendingSphereCaptures.add(PendingSphereCapture(cell, az, pitch))
                     },
                     sphereGridData = sphereGrid,
                     sphereCurrentCell = sphereCurrentCell,
-                    sphereCellImages = sphereCellImages,
+                    sphereGhostFrames = sphereGhostFrames,
                 )
 
                 shownWhen { isHdrMode() && !isNightSight() }.frame {
