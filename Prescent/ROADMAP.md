@@ -28,7 +28,16 @@ This document outlines the long-term plan for the Prescent computational photogr
 - [x] **iCam06 Perceptual Model** — CAT02 chromatic adaptation, local adaptation via Gaussian, sigmoidal compression, XYZ color space pipeline.
 - [ ] **Random Algorithm Mode** — picks random algorithm + settings.
 - [ ] **Interactive Preview** — bottom sheet (slide-up) for algorithm settings.
-- [ ] **Post-Processing Suite** — crop, AI upscaling, brightness/contrast/saturation, sharpening.
+- [x] **Multi-Scale Guided Fusion** — edge-aware multi-scale blending via bilateral filter. No halos on high-contrast edges.
+- [x] **Exposure Stack Joint Denoising** — uses well-exposed frame as guide to denoise underexposed brackets.
+- [x] **Dark Channel Prior Dehazing** — single-image dehazing for landscape photos.
+- [x] **Multi-Frame Super Resolution** — ECC shift estimation + shift-and-add up to 4×.
+- [x] **Retinex Tone Mapping** — illumination × reflectance decomposition with compressed lighting.
+- [x] **Saliency-Weighted Exposure Fusion** — frequency-tuned saliency boosts attention-grabbing regions.
+- [x] **Artistic Effects** — Orton (sharp+blur blend), Miniature/Tilt-Shift (graduated blur), Bokeh (defocus).
+- [ ] **Post-Processing Suite** — crop, AI upscaling, brightness/contrast/saturation, traditional sharpening.
+- [ ] **Persist settings** — save enhancements toggles, effect state, super-res, dehaze params via `PersistentProperty`.
+- [ ] **Smart frame selection for Quad Bayer** — wire `selectSharpestFrames` into the RAW pipeline (needs RAW→sharpness evaluation).
 
 ## Phase 3: Specialized Photography Modes
 - [x] **Night Sight / Astrophotography:**
@@ -42,9 +51,16 @@ This document outlines the long-term plan for the Prescent computational photogr
   - Manual shutter speed control where possible
 - [x] **Focus Stacking (Macro Photography):**
   - Capture sequence at different focus distances (auto-sweep via CameraX setFocusDistance)
-  - Laplacian-based sharpness map per region per frame
+  - Laplacian-based sharpness map per region per frame (single & multi-scale)
   - Blend sharpest regions into single deep-focus composite (weighted by sharpness)
   - Preview and export the stacked result
+  - [x] Depth map generation (grayscale + jet colormap visualization)
+  - [x] Interactive refocus (tap anywhere to re-render at that focal plane)
+  - [x] Exposure-balanced stacking (normalizes brightness shifts from focus breathing)
+  - [x] Scale-invariant feature alignment (ORB + homography replaces MTB for macro)
+  - [x] HDR + Focus hybrid (group frames by focus, Mertens merge per group, then stack)
+  - [x] Focus bracketing optimizer (circle-of-confusion math, recommends step count)
+  - [x] Multi-scale Laplacian pyramid stacking (per-level sharpest pixel selection)
 - [x] **Spatial / 3D Images (dual-lens devices):**
   - Capture two sequential shots (300ms delay for movement)
   - Feature matching for rectification (ORB + RANSAC homography)

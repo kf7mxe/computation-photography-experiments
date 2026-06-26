@@ -22,6 +22,7 @@ import android.graphics.RectF
 import android.media.ExifInterface
 import android.view.Surface
 import android.view.View
+import android.widget.Toast
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.camera.camera2.interop.Camera2CameraControl
@@ -36,6 +37,10 @@ import com.lightningkite.kiteui.views.*
 import com.lightningkite.kiteui.views.direct.*
 import com.lightningkite.reactive.core.Signal
 import com.lightningkite.reactive.context.reactive
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.Executors
 import kotlin.math.abs
@@ -64,7 +69,15 @@ actual fun ElementWriter.cameraView(
     onSphereFrameOrientation: ((Float, Float) -> Unit)?,
     sphereGridData: Signal<List<List<Boolean>>>,
     sphereCurrentCell: Signal<Pair<Int, Int>?>,
-    sphereGhostFrames: Signal<List<SphereGhostFrame>>
+    sphereGhostFrames: Signal<List<SphereGhostFrame>>,
+    isQuadBayer: Signal<Boolean>,
+    quadBayerFrameCount: Signal<Int>,
+    quadBayerAlgorithm: Signal<Int>,
+    quadBayerCaptureTrigger: Signal<Int>,
+    quadBayerPipeToHdr: Signal<Boolean>,
+    quadBayerPipeToNightSight: Signal<Boolean>,
+    quadBayerSaveDng: Signal<Boolean>,
+    onQuadBayerCaptured: ((List<String>) -> Unit)?
 ) {
     val androidContext = AndroidAppContext.applicationCtx
     val mainExecutor = ContextCompat.getMainExecutor(androidContext)
@@ -266,8 +279,10 @@ actual fun ElementWriter.cameraView(
 
     var imageCapture: ImageCapture? = null
     var currentCamera: Camera? = null
+    var currentEntry: CameraEntry? = null
 
     fun startCamera(entry: CameraEntry) {
+        currentEntry = entry
         val provider = cameraProvider ?: return
         val lifecycleOwner = AndroidAppContext.activityCtx ?: return
         Log.d("CameraView", "startCamera: ${entry.label}")
@@ -549,6 +564,192 @@ actual fun ElementWriter.cameraView(
         captureShot()
     }
 
+    // ── Quad Bayer RAW Capture ──────────────────────────────────────────
+    var quadBayerCapturing = false
+    fun captureQuadBayerFrames(callback: (List<String>) -> Unit) {
+        if (quadBayerCapturing) {
+            Log.w("CameraView", "Quad Bayer: already capturing, ignoring trigger")
+            return
+        }
+        quadBayerCapturing = true
+        val framesPerBracket = quadBayerFrameCount.value.coerceIn(1, 3)
+        val pipeHdr = quadBayerPipeToHdr.value
+        val pipeNight = quadBayerPipeToNightSight.value
+
+        fun done(result: List<String>) {
+            quadBayerCapturing = false
+            callback(result)
+        }
+
+        val entry = currentEntry ?: run {
+            Log.e("CameraView", "Quad Bayer: no current entry")
+            done(emptyList()); return
+        }
+        val camManager = androidContext.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val cameraId = currentCamera?.let { QuadBayerEngine.getCameraId(it) }
+            ?: entry.physicalCameraId
+            ?: run {
+            Log.e("CameraView", "Quad Bayer: no active camera")
+            done(emptyList()); return
+        }
+
+        val info = QuadBayerEngine.detectRawCapability(camManager, cameraId)
+        if (!info.supportsRaw) {
+            Log.e("CameraView", "RAW not supported on camera $cameraId")
+            Toast.makeText(androidContext, "RAW not supported on this camera", Toast.LENGTH_SHORT).show()
+            done(emptyList()); return
+        }
+
+        Log.d("CameraView", "Quad Bayer capture: $framesPerBracket frames/bracket, sensor ${info.pixelArraySize}")
+        cameraProvider?.unbindAll()
+
+        GlobalScope.launch(Dispatchers.IO) {
+            try {
+                if (pipeHdr && framesPerBracket >= 1) {
+                    // ── HDR pipe: 3 brackets × N frames each ──
+                    val bracketEVs = listOf(-2f, 0f, 2f)
+                    val algo = QuadBayerAlgorithm.entries.getOrElse(
+                        quadBayerAlgorithm.value
+                    ) { QuadBayerAlgorithm.FULL_REMOSAIC }
+
+                    val bounds = QuadBayerEngine.getSensorInfo(androidContext, cameraId)
+
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(androidContext, "Quad Bayer: metering scene...", Toast.LENGTH_SHORT).show()
+                    }
+                    val meter = QuadBayerEngine.measureAutoExposure(androidContext, cameraId, info, bounds)
+
+                    if (meter == null) {
+                        withContext(Dispatchers.Main) {
+                            startCamera(entry)
+                            Toast.makeText(androidContext, "Quad Bayer: metering failed", Toast.LENGTH_LONG).show()
+                            done(emptyList())
+                        }
+                        return@launch
+                    }
+
+                    val bracketJpegs = mutableListOf<String>()
+                    val totalBrackets = bracketEVs.size
+
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(androidContext, "Quad Bayer HDR: capturing $totalBrackets brackets...", Toast.LENGTH_SHORT).show()
+                    }
+
+                    for ((bi, ev) in bracketEVs.withIndex()) {
+                        val ratio = Math.pow(2.0, ev.toDouble())
+                        val targetExp = (meter.exposureTimeNs * ratio).toLong()
+                            .coerceIn(bounds.exposureRange.lower, bounds.exposureRange.upper)
+                        val targetIso = meter.iso.coerceIn(bounds.isoRange.lower, bounds.isoRange.upper)
+
+                        val bracketDir = File(androidContext.cacheDir,
+                            "quadbayer/${System.currentTimeMillis()}_bracket${bi}")
+                            .also { it.mkdirs() }
+
+                        val rawPaths = QuadBayerEngine.captureRawFrames(
+                            androidContext, cameraId, framesPerBracket, bracketDir, info,
+                            ManualExposure(targetExp, targetIso)
+                        )
+
+                        if (rawPaths.size < framesPerBracket) {
+                            Log.w("CameraView", "Bracket $bi: only ${rawPaths.size}/$framesPerBracket frames")
+                        }
+
+                        if (rawPaths.isNotEmpty()) {
+                            val result = processQuadBayer(rawPaths, QuadBayerOptions(algorithm = algo, saveDng = quadBayerSaveDng.value))
+                            if (result != null) {
+                                bracketJpegs.add(result)
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(androidContext, "Quad Bayer HDR: bracket ${bi+1}/$totalBrackets done", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                    }
+
+                    Log.d("CameraView", "Quad Bayer HDR: bracketJpegs final size=${bracketJpegs.size} paths=${bracketJpegs}")
+                    withContext(Dispatchers.Main) {
+                        startCamera(entry)
+                        if (bracketJpegs.size >= 2) {
+                            Toast.makeText(androidContext, "Quad Bayer HDR: ${bracketJpegs.size} brackets ready", Toast.LENGTH_SHORT).show()
+                            done(bracketJpegs)
+                        } else {
+                            Toast.makeText(androidContext, "Quad Bayer HDR: bracket capture failed (got ${bracketJpegs.size})", Toast.LENGTH_LONG).show()
+                            done(emptyList())
+                        }
+                    }
+                } else {
+                    // ── Single bracket (no pipe): N frames, auto-exposure, merge into 1 JPEG ──
+                    val outputDir = File(androidContext.cacheDir, "quadbayer/${System.currentTimeMillis()}")
+                        .also { it.mkdirs() }
+
+                    val rawPaths = QuadBayerEngine.captureRawFrames(
+                        androidContext, cameraId, framesPerBracket, outputDir, info
+                    )
+
+                    if (rawPaths.isEmpty()) {
+                        withContext(Dispatchers.Main) {
+                            startCamera(entry)
+                            Toast.makeText(androidContext, "RAW capture failed", Toast.LENGTH_SHORT).show()
+                            done(emptyList())
+                        }
+                        return@launch
+                    }
+
+                    withContext(Dispatchers.Main) {
+                        startCamera(entry)
+                        Toast.makeText(androidContext, "Processing ${rawPaths.size} RAW frames...", Toast.LENGTH_SHORT).show()
+                    }
+
+                    try {
+                        val algo = QuadBayerAlgorithm.entries.getOrElse(
+                            quadBayerAlgorithm.value
+                        ) { QuadBayerAlgorithm.FULL_REMOSAIC }
+
+                        val saveDng = quadBayerSaveDng.value
+                        val result = processQuadBayer(rawPaths, QuadBayerOptions(algorithm = algo, saveDng = saveDng))
+                        withContext(Dispatchers.Main) {
+                            if (result != null) {
+                                if (!pipeNight) {
+                                    val bitmap = BitmapFactory.decodeFile(result)
+                                    if (bitmap != null) {
+                                        saveBayerToGallery(bitmap)
+                                        if (saveDng) {
+                                            try {
+                                                val dngFile = File(outputDir, "merged.dng")
+                                                if (dngFile.exists()) {
+                                                    saveDngToGallery(dngFile)
+                                                }
+                                            } catch (e: Exception) {
+                                                Log.e("CameraView", "DNG gallery save failed", e)
+                                            }
+                                        }
+                                        bitmap.recycle()
+                                    }
+                                }
+                                done(listOf(result))
+                            } else {
+                                Toast.makeText(androidContext, "Quad Bayer processing failed", Toast.LENGTH_LONG).show()
+                                done(emptyList())
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("CameraView", "Quad Bayer processing crash", e)
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(androidContext, "Quad Bayer error: ${e.message}", Toast.LENGTH_LONG).show()
+                            done(emptyList())
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("CameraView", "Quad Bayer capture failed", e)
+                withContext(Dispatchers.Main) {
+                    startCamera(entry)
+                    Toast.makeText(androidContext, "Quad Bayer error: ${e.message}", Toast.LENGTH_LONG).show()
+                    done(emptyList())
+                }
+            }
+        }
+    }
+
     // ── Sphere ghost frames sync & overlay update ───────────────────────
     reactive {
         lastGhostFrames = sphereGhostFrames()
@@ -561,7 +762,9 @@ actual fun ElementWriter.cameraView(
         shutterTrigger()
         if (isInitialRun) { isInitialRun = false; return@reactive }
         Log.d("CameraView", "Shutter trigger received")
-        if (isSpatial()) {
+        if (isQuadBayer()) {
+            Log.d("CameraView", "Quad Bayer mode — handled via quadBayerCaptureTrigger")
+        } else if (isSpatial()) {
             Log.d("CameraView", "Spatial mode — handled via spatialCaptureTrigger")
         } else if (isNightSight()) {
             Log.d("CameraView", "Night sight mode — handled via nightSightCaptureTrigger")
@@ -606,6 +809,18 @@ actual fun ElementWriter.cameraView(
         if (isSpatial()) {
             captureSpatialPair { frames ->
                 onSpatialCaptured?.invoke(frames)
+            }
+        }
+    }
+
+    // ── Quad Bayer capture trigger observer ────────────────────────────
+    var qbInitial = true
+    reactive {
+        quadBayerCaptureTrigger()
+        if (qbInitial) { qbInitial = false; return@reactive }
+        if (isQuadBayer()) {
+            captureQuadBayerFrames { frames ->
+                onQuadBayerCaptured?.invoke(frames)
             }
         }
     }

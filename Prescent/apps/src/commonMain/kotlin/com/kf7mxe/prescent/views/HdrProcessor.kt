@@ -21,5 +21,34 @@ expect suspend fun processHdr(
     icam06ChromaticAdaptation: Float = 1.0f,
     icam06LocalAdaptation: Float = 1.0f,
     surrealAmount: Float = 0.5f,
-    maxSize: Int = 0
+    maxSize: Int = 0,
+    pyramidNoiseStrength: Float = 1.0f,
+    // Pre-processing per-frame
+    enableHotPixelFix: Boolean = false,
+    enableCACorrection: Boolean = false,
+    enableLensCorrection: Boolean = false,
+    // Post-processing on result
+    enableSmartNR: Boolean = false,
+    enableContrastSharpening: Boolean = false,
+    smartFrameSelection: Boolean = false,
+    // New algorithms
+    guidedFusionLevels: Int = 4,
+    guidedFusionSigmaColor: Float = 30.0f,
+    guidedFusionSigmaSpace: Float = 30.0f,
+    retinexSigma: Float = 30.0f,
+    retinexCompression: Float = 0.5f,
+    retinexGamma: Float = 0.8f,
+    saliencyWeight: Float = 0.4f,
+    // Pre/post steps
+    enableJointDenoise: Boolean = false,
+    enableDehaze: Boolean = false,
+    dehazePatchSize: Int = 15,
+    dehazeOmega: Float = 0.95f,
+    superResolutionScale: Int = 0,
+    artisticEffect: String = "None",
+    artisticOrtonBlurRadius: Int = 15,
+    artisticOrtonOpacity: Float = 0.4f,
+    artisticMiniatureFocusY: Float = 0.5f,
+    artisticMiniatureBlurHeight: Float = 0.3f,
+    artisticBokehRadius: Int = 25
 ): String?

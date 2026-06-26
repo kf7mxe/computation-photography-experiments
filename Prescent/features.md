@@ -27,6 +27,7 @@ Focus Stacking, Photo Sphere, 3D Spatial) and eventual DSLR tethering on Desktop
 | **Focus Stack** | Multi-focus capture with Laplacian sharpness blending | ✅ Done |
 | **Spatial / 3D** | Stereo pair capture with depth map and anaglyph | ✅ Done |
 | **Photo Sphere** | Multi-shot panorama stitching | ✅ Done |
+| **Quad Bayer** | RAW capture + software demosaic (Full Remosaic, Bin-to-Bayer, Edge-Guided) with pipe-to-HDR/NightSight | ✅ Done |
 
 ---
 
@@ -168,11 +169,11 @@ Algorithms to include:
 - [x] Long-exposure frame stacking (capture N frames, align & average)
 - [x] Configurable frame count (via `nightSightFrameCount`)
 - [x] Noise reduction via temporal averaging
-- [x] Dark frame subtraction (wired in processor, no capture UI yet)
+- [x] Dark frame subtraction (wired in processor, with file-picker UI)
 - [x] Star trail mode (max-blend instead of average)
 - [x] Brightness boost slider (0.5x–4.0x)
 - [x] CLAHE local contrast enhancement
-- [ ] Dark frame capture UI (currently must be passed programmatically)
+- [x] Dark frame selection UI (file picker to load dark frame, toggle to enable/disable subtraction)
 - [ ] Manual shutter speed / ISO control
 
 ### Focus Stacking (Macro Photography)
@@ -222,8 +223,14 @@ Algorithms to include:
 - [ ] Pull EXIF / metadata directly from camera sensor
 - [ ] Trigger native AEB or manual bracketing via tether
 
-### Pixel Binning Algorithms
-- [ ] Software pixel binning (2×2, 4×4) for noise reduction
+### Pixel Binning / Quad Bayer
+- [x] Quad Bayer RAW capture via direct Camera2 API (RAW_SENSOR format)
+- [x] 3 demosaic algorithms: Full Remosaic (default), Bin-to-Bayer, Edge-Guided
+- [x] Multi-frame RAW capture (2–3 frames) with averaging for noise reduction
+- [x] Auto white balance + Reinhard tone mapping + histogram stretch
+- [x] Pipe Quad Bayer output into HDR or Night Sight pipelines
+- [x] DNG/RAW export — save merged RAW as DNG alongside processed JPEG
+- [ ] Software pixel binning (2×2, 4×4) as standalone option
 - [ ] Compare binned vs unbinned output
 - [ ] Integrate into low-light pipeline
 

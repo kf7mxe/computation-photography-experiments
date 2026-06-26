@@ -2,6 +2,7 @@ package com.kf7mxe.prescent.views
 
 import com.kf7mxe.prescent.FullscreenPage
 import com.kf7mxe.prescent.GlobalNavigator
+import com.kf7mxe.prescent.utils.copyFileReferencesToPaths
 import com.kf7mxe.prescent.utils.fmt
 import com.lightningkite.kiteui.*
 import com.lightningkite.kiteui.models.*
@@ -25,6 +26,8 @@ class NightSightPage(val frames: List<String> = listOf()) : Page, FullscreenPage
     val luckyFraction = Signal(0.6f)
     val starTrail = Signal(false)
     val brightnessBoost = Signal(1.5f)
+    val useDarkFrame = Signal(false)
+    val darkFramePath = Signal<String?>(null)
     val isProcessing = Signal(false)
     val previewPath = Signal<String?>(null)
     val resultPath = Signal<String?>(null)
@@ -89,6 +92,45 @@ class NightSightPage(val frames: List<String> = listOf()) : Page, FullscreenPage
                         }
                     } else {
                         useLucky.value = false
+                    }
+                }
+
+                // ── Dark Frame Subtraction ──────────────────────────────
+                card.padded.col {
+                    h2 { content = "Dark Frame" }
+                    subtext("Dark frame subtraction removes fixed-pattern noise from long exposures")
+                    row {
+                        text("Enable")
+                        switch { checked bind useDarkFrame }
+                    }
+                    shownWhen { useDarkFrame() }.col {
+                        row {
+                            expanding.button {
+                                icon(Icon.upload, "Select Dark Frame")
+                                onClick {
+                                    launch {
+                                        val files = context.requestFiles(listOf("image/*"))
+                                        if (files.isNotEmpty()) {
+                                            val paths = copyFileReferencesToPaths(files)
+                                            if (paths.isNotEmpty()) {
+                                                darkFramePath.value = paths.first()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            button {
+                                icon(Icon.close, "Clear")
+                                onClick { darkFramePath.value = null; useDarkFrame.value = false }
+                            }
+                        }
+                        reactive {
+                            val df = darkFramePath()
+                            when {
+                                df != null -> text("Dark frame: $df")
+                                else -> text("No dark frame selected. Capture a photo with the lens covered and select it here.")
+                            }
+                        }
                     }
                 }
 
@@ -188,7 +230,7 @@ class NightSightPage(val frames: List<String> = listOf()) : Page, FullscreenPage
                 useLuckyPreFilter = useLucky.value && nsAlgorithm.value.supportsLuckyPreFilter,
                 luckyKeepFraction = luckyFraction.value,
                 starTrail = starTrail.value,
-                darkFramePath = null,
+                darkFramePath = if (useDarkFrame.value) darkFramePath.value else null,
                 brightnessBoost = brightnessBoost.value,
                 maxPreviewSize = if (fullSize) 0 else 1024
             )

@@ -70,6 +70,7 @@ kotlin {
                 api(libs.camerax.lifecycle)
                 api(libs.camerax.view)
                 api(libs.opencv)
+                implementation(libs.coroutines.android)
             }
         }
         if (onMac) {

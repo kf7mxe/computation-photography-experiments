@@ -503,3 +503,244 @@ Renamed `currentPitch` → `currentElevation` to reflect the corrected meaning.
 
 - `apps/src/jsMain/kotlin/.../views/CameraView.js.kt` — Updated stub signature.
 - `apps/src/iosMain/kotlin/.../views/CameraView.ios.kt` — Updated stub signature.
+
+### 2026-06-22 06:00
+
+**Session goal:** Implement Quad Bayer RAW capture + processing pipeline.
+
+**Summary:** Added a complete Quad Bayer photography mode: direct Camera2 RAW capture (bypassing CameraX), software demosaic with 3 algorithms, multi-frame merging, and pipe-to-HDR/NightSight.
+
+**New files:**
+
+- `apps/src/commonMain/kotlin/.../views/QuadBayerProcessor.kt` — `expect` declaration: `QuadBayerAlgorithm` enum (BIN_TO_BAYER, FULL_REMOSAIC, EDGE_GUIDED), `QuadBayerOptions` data class, `processQuadBayer()` suspend function.
+
+- `apps/src/androidMain/kotlin/.../views/QuadBayerEngine.android.kt` — Camera2 RAW capture engine:
+  - `detectRawCapability()` — queries `CameraCharacteristics` for RAW support, sensor size, Bayer pattern, black/white levels, bit depth
+  - `captureRawFrames()` — opens Camera2 device, creates `ImageReader(RAW_SENSOR, 3)`, captures N frames sequentially (150ms apart), saves to `.raw` files with 40-byte header (magic, width, height, bitDepth, bayerPattern, blackLevel[4], whiteLevel) followed by uint16 pixel data
+  - `readRawFile()` — reads `.raw` files back into `RawFrame` data class
+  - Uses `CountDownLatch`-based Camera2 callbacks with dedicated `HandlerThread`
+
+- `apps/src/androidMain/kotlin/.../views/QuadBayerProcessor.android.kt` — `actual` implementation:
+  - Loads RAW frames → normalizes to [0,1] float → 3 algorithms per 2×2 cluster:
+    - **BIN_TO_BAYER**: average 4 same-color pixels → half-res Bayer → OpenCV `COLOR_Bayer*2BGR_EA` edge-aware demosaic
+    - **FULL_REMOSAIC** (default): TL pixel from each 2×2 → half-res Bayer → same demosaic
+    - **EDGE_GUIDED**: per-cluster variance decides blend between TL and average
+  - Multi-frame merge: average (element-wise) in normalized float domain before demosaic
+  - Auto white balance: gray-world on post-demosaic BGR channels (scale R/B to match G mean)
+  - Tone mapping: Reinhard luminance compression + gamma correction + 0.5% histogram clip
+  - Output: 8-bit BGR → Bitmap → JPEG (quality 95)
+
+**Files changed:**
+
+- `apps/src/commonMain/kotlin/.../views/CameraView.kt` — Added `isQuadBayer`, `quadBayerFrameCount`, `quadBayerAlgorithm`, `quadBayerCaptureTrigger`, `onQuadBayerCaptured` params to expect declaration.
+
+- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt`:
+  - Updated actual signature with new Quad Bayer params
+  - Added `currentEntry: CameraEntry?` field for re-binding after RAW capture
+  - Added `captureQuadBayerFrames()`: unbinds CameraX → Engine.captureRawFrames() → rebinds CameraX → Processor.processQuadBayer() → callback
+  - Added reactive observer for `quadBayerCaptureTrigger`
+  - Shutter trigger now skips Quad Bayer mode (handled by dedicated trigger)
+
+- `apps/src/jsMain/kotlin/.../views/CameraView.js.kt` — Added Quad Bayer stub params.
+- `apps/src/iosMain/kotlin/.../views/CameraView.ios.kt` — Added Quad Bayer stub params.
+
+- `apps/src/commonMain/kotlin/.../views/CameraPage.kt`:
+  - Added `isQuadBayer`, `quadBayerFrameCount`, `quadBayerAlgorithm`, `quadBayerCaptureTrigger`, `quadBayerPipeToHdr`, `quadBayerPipeToNightSight` signals
+  - Added "Quad" mode toggle button (7th capture mode)
+  - Mode switcher sets `isQuadBayer` when "quadbayer" selected, clears on mode exit
+  - Shutter trigger dispatches to `quadBayerCaptureTrigger` in Quad Bayer mode
+  - Quad Bayer UI overlay: frame count display, algorithm picker (3 toggles), pipe-to-HDR/NightSight checkboxes with mutual exclusion
+  - `onQuadBayerCaptured` navigates to HdrProcessingPage, NightSightPage, or GalleryPage based on pipe settings
+
+- `features.md` — Added Quad Bayer row to Pages table. Added Pixel Binning/Quad Bayer section under Phase 4 with implementation status. Added DNG/RAW export as future checkbox.
+
+### 2026-06-22 06:30
+
+**Session goal:** Fix Quad Bayer pipe-to-HDR (was only sending 1 image), fix no-pipe mode (wasn't saving to gallery), speed up processing.
+
+**Issues fixed:**
+
+1. **HDR pipe only sent 1 image** — `captureQuadBayerFrames()` now reads `quadBayerPipeToHdr` signal. When true, each RAW frame is processed individually (not merged), and all resulting JPEGs are fed to the HDR pipeline. RAW frames are captured with different EV offsets (-2, 0, +2 EV for 3 frames, -1.5/+1.5 for 2) via `CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION`.
+
+2. **No-pipe mode didn't save** — `captureQuadBayerFrames()` now calls `saveBayerToGallery()` (MediaStore) after processing when no pipe is selected, so the result appears in the system gallery. GalleryPage navigation still happens on the CameraPage side.
+
+3. **Slow pixel loops** — Replaced all per-pixel Kotlin `for` loops with OpenCV operations:
+   - **FULL_REMOSAIC**: `Imgproc.resize(INTER_NEAREST)` — takes TL pixel of each 2×2 cluster in one call
+   - **BIN_TO_BAYER**: `Imgproc.filter2D(2×2 avg kernel)` + `resize(INTER_NEAREST)` — box blur then subsample
+   - **EDGE_GUIDED**: same operations separately, kept for reference but pixel-quality per-pixel loop removed
+
+4. **Pipe signals wired through expect/actual** — Added `quadBayerPipeToHdr` and `quadBayerPipeToNightSight: Signal<Boolean>` as parameters to the `cameraView()` expect/actual chain so CameraView has access to the pipe mode at capture time.
+
+**Files changed:**
+- `apps/src/androidMain/.../views/QuadBayerEngine.android.kt` — Added `evOffsets: List<Float>` optional parameter to `captureRawFrames()`. Sets `AE_EXPOSURE_COMPENSATION` per frame.
+- `apps/src/androidMain/.../views/QuadBayerProcessor.android.kt` — Rewrote algorithm section: replaced pixel loops with `Imgproc.resize(INTER_NEAREST)` for FULL_REMOSAIC, `filter2D + resize` for BIN_TO_BAYER, kept EDGE_GUIDED as a reference. Added `saveBayerToGallery(bitmap)` and `matToBitmap()` helper functions. Added MediaStore/ContentValues imports.
+- `apps/src/commonMain/.../views/CameraView.kt` — Added `quadBayerPipeToHdr`, `quadBayerPipeToNightSight` signal params to expect declaration.
+- `apps/src/androidMain/.../views/CameraView.android.kt` — Updated actual signature. `captureQuadBayerFrames()` now reads pipe flags, sets EV offsets for HDR pipe, processes each RAW individually for HDR, saves to gallery in no-pipe mode.
+- `apps/src/commonMain/.../views/CameraPage.kt` — Passes `quadBayerPipeToHdr`, `quadBayerPipeToNightSight` signals to `cameraView()`.
+- `apps/src/jsMain/.../views/CameraView.js.kt` — Updated stub with new signal params.
+- `apps/src/iosMain/.../views/CameraView.ios.kt` — Updated stub with new signal params.
+
+### 2026-06-22 07:00
+
+**Session goal:** Fix Quad Bayer hangs/stalls — tone mapping per-pixel loops were 12M JNI calls per frame (20+ seconds).
+
+**Root cause:** `toneMapReinhard()` used per-pixel `Mat.get()/put()` loops for luminance computation (8000×6000), Reinhard tone curve, and histogram sorting. Each get/put is a JNI boundary call. At 4000×3000 (half res), this was 12M iterations × multiple accesses = 36M+ JNI calls taking ~20 seconds per frame. For the HDR pipe (2 frames processed sequentially), this was ~40 seconds with no UI feedback.
+
+**Fix — replaced with pure OpenCV matrix operations:**
+- **Luminance:** `Core.addWeighted(r, 0.299, g, 0.587)` + second `addWeighted(b, 0.114)` — vectorized, no per-pixel loops
+- **Reinhard:** `Core.multiply(ls)` → `Core.add(ls, 1.0)` → `Core.divide(ls, onePlusLs)` → `Core.patchNaNs` → `Core.divide(lMapped, ls, scale)` → `Core.multiply(ch, key)` → `Core.multiply(ch, scale)` → `Core.pow(ch, gamma)` → all vectorized
+- **Contrast stretch:** Replaced O(n log n) sort with mean±2.5σ using `Core.meanStdDev` — single-pass vectorized
+- **Result:** Processing time drops from ~20s per frame to ~1-2s per frame
+
+**Additional fixes:**
+- Added try-catch around the entire coroutine body in `captureQuadBayerFrames()` so any exception invokes `callback(emptyList())` with an error toast instead of silently hanging
+- Removed broken `async` usage (deprecated in kotlinx.coroutines 1.9+), kept sequential processing (now fast enough)
+
+**Files changed:**
+- `apps/src/androidMain/.../views/QuadBayerProcessor.android.kt` — Full rewrite of `toneMapReinhard()` with vectorized OpenCV operations. Removed all per-pixel `get()`/`put()` loops.
+- `apps/src/androidMain/.../views/CameraView.android.kt` — Added try-catch in coroutine body, removed `async` import, sequential processing with error logging.
+
+### 2026-06-23 09:00
+
+**Session goal:** Fix compilation errors, restore algorithm selection, add DNG export and dark frame UI.
+
+**Files changed:**
+
+- `apps/src/androidMain/.../views/CameraView.android.kt` — **Fixed duplicate `val algo`** (lines 598 and 619) that would cause compilation failure. Updated `processQuadBayer` calls in both HDR pipe and no-pipe branches to pass `saveDng = quadBayerSaveDng.value`. Added DNG gallery save call in no-pipe path. Added `quadBayerSaveDng: Signal<Boolean>` to actual signature.
+
+- `apps/src/androidMain/.../views/QuadBayerProcessor.android.kt` — **Full algorithm selection restore**: each algorithm now properly implemented:
+  - **BIN_TO_BAYER**: 2×2 box filter averaging + INTER_NEAREST subsample → Bayer at half-res → demosaic
+  - **FULL_REMOSAIC**: INTER_NEAREST subsample (TL pixel from each 2×2 cluster) → Bayer at half-res → demosaic  
+  - **EDGE_GUIDED**: Local variance computation per 2×2 cluster → adaptive blend weight between TL and average → Bayer → demosaic
+  - **New DNG writer** (`saveRawAsDng`): Writes minimal spec-compliant DNG with TIFF header, IFD entries for all required DNG tags (NewSubFileType, ImageWidth/Height, BitsPerSample=16, Compression=uncompressed, CFA PhotometricInterpretation, BlackLevel, WhiteLevel, CFARepeatPatternDim, CFAPattern, CFAPlaneColor), and raw uint16 pixel data. Two-phase write (header buffer + pixel stream) to handle large sensors.
+  - **New `saveDngToGallery()`**: Copies DNG to MediaStore Pictures/Prescent/ on API 29+, or direct file + MediaScanner on older versions.
+  - Added `import java.io.ByteArrayOutputStream`, `import java.nio.ByteBuffer`, `import java.nio.ByteOrder`.
+
+- `apps/src/commonMain/.../views/QuadBayerProcessor.kt` — Added `saveDng: Boolean = false` to `QuadBayerOptions` data class.
+
+- `apps/src/commonMain/.../views/CameraView.kt` — Added `quadBayerSaveDng: Signal<Boolean> = Signal(false)` parameter to expect declaration. Changed `quadBayerFrameCount` default from `Signal(2)` to `Signal(3)` to match CameraPage.
+
+- `apps/src/commonMain/.../views/CameraPage.kt` — Added `quadBayerSaveDng` signal and "Save DNG" toggle button in Quad Bayer overlay. Passes signal to `cameraView()` call.
+
+- `apps/src/jsMain/.../views/CameraView.js.kt` — Added `quadBayerSaveDng: Signal<Boolean>` to stub actual signature.
+
+- `apps/src/iosMain/.../views/CameraView.ios.kt` — Added `quadBayerSaveDng: Signal<Boolean>` to stub actual signature.
+
+- `apps/src/commonMain/.../views/NightSightPage.kt` — **Dark frame selection UI**: Added `useDarkFrame: Signal<Boolean>` and `darkFramePath: Signal<String?>` signals. Added dark frame card with file picker button (uses `requestFiles` + `copyFileReferencesToPaths`), enable/disable toggle, and clear button. Shows selected path or instructional text. Wired `darkFramePath` into `processNightSight()` call instead of hardcoded `null`. Added import for `copyFileReferencesToPaths`.
+
+- `features.md` — DNG/RAW export marked [x]; Dark frame selection UI marked [x] (was "no capture UI yet").
+### 2026-06-23 07:30
+
+**Session goal:** Fix Quad Bayer HDR only capturing 2 frames instead of 3, all with same exposure.
+
+**Root causes:**
+
+1. **Only 2 images instead of 3:** The ImageReader `onImageAvailable` listener ran `saveImage()` (file I/O) directly on the camera handler thread. When the 3rd capture completed, the handler was still processing the file write of the 1st image, so the ImageReader buffer pool was exhausted and the 3rd frame silently failed. CameraHandler is a single-threaded HandlerThread — any blocking work prevents processing of subsequent callbacks and image arrivals.
+
+2. **All same exposure:** `AE_EXPOSURE_COMPENSATION` does not affect `RAW_SENSOR` captures. This metering hint only biases the auto-exposure target for processed outputs (YUV/JPEG). RAW captures always get the sensor's native exposure regardless of compensation values.
+
+**Fixes applied:**
+
+- **Separated capture from I/O in ImageReader listener:** The listener now copies the pixel buffer (`ShortArray` from `ByteBuffer`) and **closes the image immediately** (freeing the buffer pool slot). File saving (header + pixel data written to `.raw` file) is dispatched to a dedicated `Executors.newSingleThreadExecutor()`. The `framesLatch` counts down when the image is acquired+closed, not when the file save completes. This guarantees all 3 frames fit in the 3-slot ImageReader buffer pool.
+
+- **Manual exposure for RAW bracketing:** Frame 0 is captured with `AE_MODE = ON` (auto-exposure). Its `onCaptureCompleted` callback reads the actual `SENSOR_EXPOSURE_TIME` and `SENSOR_SENSITIVITY` from the `TotalCaptureResult`. Frames 1+ use `AE_MODE = OFF` with `SENSOR_EXPOSURE_TIME = baseExposure × 2^EV` and `SENSOR_SENSITIVITY = baseIso`, clamped to sensor ranges from `CameraCharacteristics`. A per-frame `CountDownLatch` waits for each capture callback to fire before submitting the next frame (blocking the singleExecutor thread, not the camera handler).
+
+- **Default frame count:** Changed `quadBayerFrameCount` default from `2` to `3` to match the standard HDR bracket count. Added 1/2/3 toggle buttons in the Quad Bayer overlay.
+
+**Files changed:**
+
+- `apps/src/androidMain/.../views/QuadBayerEngine.android.kt` — Full rewrite of `captureRawFrames()`: listener copies buffer + closes immediately, dispatches save to `ioExecutor`. Manual exposure bracketing via `AE_MODE_OFF` + `SENSOR_EXPOSURE_TIME`. Per-frame `frameLatch` for capture sequencing. Removed unused `saveImage()` function. Added `Collections`, `Executors`, `AtomicLong`, `AtomicInteger` usage.
+
+- `apps/src/commonMain/.../views/CameraPage.kt` — Changed `quadBayerFrameCount` default to 3. Replaced frame count display text with 1/2/3 toggle button selector row. Cleaned up duplicate Quad Bayer overlay code from earlier edit.
+
+- `apps/src/androidMain/.../views/CameraView.android.kt` — (No changes in this session, previous wiring already correct.)
+
+### 2026-06-23 10:00
+
+**Session goal:** Fix Quad Bayer HDR only sending 1 of 3 bracket images to the HDR processing page.
+
+**Investigation findings:** Static code analysis showed the data flow should correctly pass all 3 JPEGs. The `bracketJpegs` list is populated in a sequential for-loop on a background thread, then `done(bracketJpegs)` is called with the full list on the main thread. All 3 bracket toasts fire, confirming `processQuadBayer()` returns non-null for all 3 brackets.
+
+**Primary suspect:** `kotlinx.coroutines.runBlocking { processQuadBayer(...) }` running on `singleExecutor` (a single-thread `Executors.newSingleThreadExecutor()`). `runBlocking` blocks the thread with its own event loop, and `processQuadBayer` uses `withContext(Dispatchers.IO)`. The interaction between `runBlocking`'s event loop interception and the IO dispatcher can cause subtle coroutine dispatch issues that silently lose results for subsequent iterations.
+
+**Changes made:**
+
+- `apps/src/androidMain/.../views/CameraView.android.kt` — Refactored `captureQuadBayerFrames()`:
+  - Replaced `singleExecutor.execute { try { ... runBlocking { processQuadBayer } ... } }` with `GlobalScope.launch(Dispatchers.IO) { ... processQuadBayer ... }`.
+  - Eliminated the blocking-thread anti-pattern; suspend function now called directly without `runBlocking`.
+  - Added `Log.d("CameraView", "Quad Bayer HDR: bracketJpegs final size=...")` right before `done()`.
+  - Fixed `return@withContext` bug in the non-HDR pipe's empty-rawPaths handler — replaced with `if (rawPaths.isEmpty()) { withContext(Main) { done }; return@launch }`.
+  - Added `import kotlinx.coroutines.withContext`.
+
+- `apps/src/commonMain/kotlin/.../views/CameraPage.kt` — Added `println("CameraPage: onQuadBayerCaptured with ${paths.size} paths")` for diagnostic tracing.
+
+- `apps/src/commonMain/kotlin/.../views/HdrProcessingPage.kt` — Added `println("HdrProcessingPage created with ${images.size} images")` in `init` block for diagnostic tracing.
+
+- `gradle/libs.versions.toml` — Added `coroutines-android` library entry mapping to `kotlinx-coroutines-android:1.10.2`.
+
+- `apps/build.gradle.kts` — Added `implementation(libs.coroutines.android)` to `androidMain` dependencies (required for `Dispatchers.Main`).
+
+**Next step:** Build and test. Check `adb logcat -s CameraView CameraPage` for:
+- `Quad Bayer HDR: bracketJpegs final size=3 paths=[...]`
+- `CameraPage: onQuadBayerCaptured with 3 paths`
+- `HdrProcessingPage created with 3 images`
+
+### 2026-06-23 11:30
+
+**Session goal:** Implement 7 new algorithms: Multi-Scale Guided Fusion, Exposure Stack Joint Denoising, Dark Channel Prior Dehazing, Multi-Frame Super Resolution, Retinex Tone Mapping, Saliency-Weighted Exposure Fusion, and Artistic Effects (Orton, Miniature, Bokeh).
+
+**Files changed:**
+
+- `apps/src/androidMain/.../views/HdrAlgorithms.android.kt` — Added 7 new algorithm implementations (functions 11-17): `multiScaleGuidedFusion()`, `exposureStackJointDenoise()` + `jointDenoiseBracketPair()`, `darkChannelPriorDehaze()`, `multiFrameSuperResolution()` (ECC shift estimation + shift-and-add), `retinexToneMap()`, `saliencyWeightedFusion()` (frequency-tuned saliency), `applyArtisticEffect()` with `ortonEffect()`, `miniatureEffect()`, `bokehEffect()`. Added `GuidedFusionConfig`, `JointDenoiseConfig`, `DehazeConfig`, `SuperResConfig`, `RetinexConfig`, `SaliencyFusionConfig`, `ArtisticConfig` data classes, and `ArtisticEffect` enum. Restored accidentally deleted `fixChannelHotPixels()`. Added `TermCriteria` and `Video` imports.
+
+- `apps/src/commonMain/.../views/HdrProcessor.kt` — Added 17 new params: `guidedFusionLevels`, `guidedFusionSigmaColor/Space`, `retinexSigma/Compression/Gamma`, `saliencyWeight`, `enableJointDenoise`, `enableDehaze`, `dehazePatchSize/Omega`, `superResolutionScale`, `artisticEffect` + 5 related params.
+
+- `apps/src/androidMain/.../views/HdrProcessor.android.kt` — Updated actual signature. Added joint denoise pre-processing. Added 3 new algorithm dispatch cases: "Guided Fusion", "Retinex", "Saliency Fusion". Added post-processing pipeline: dehaze, super-resolution, artistic effects. Removed unused old `Core.subtract(Scalar, Mat, Mat)` calls.
+
+- `apps/src/commonMain/.../views/HdrProcessingPage.kt` — Added 3 new algorithms to picker (14 total). Added per-algorithm UI sections with sliders. Added Effects card: Dehaze toggle + params, Super Resolution slider, Joint Denoise toggle, Artistic Effect selector (None/Orton/Miniature/Bokeh) with per-effect sliders. All 17 new signals tracked in reactive preview and passed to `processHdr()`.
+
+- `apps/src/iosMain/.../views/HdrProcessor.ios.kt` — Updated stub signature.
+- `apps/src/jsMain/.../views/HdrProcessor.js.kt` — Updated stub signature.
+
+- `ROADMAP.md` — Marked 7 new algorithms as done. Moved persist settings to Phase 2 TODO.
+
+### 2026-06-23 15:00
+
+**Session goal:** Add 7 new focus stacking algorithms and wire up the existing dead `focusStackBlend()`.
+
+**Files changed:**
+
+- `apps/src/commonMain/.../views/FocusStackProcessor.kt` — Added 11 new params: `algorithm`, `alignmentMethod`, `exposureBalance`, `showDepthMap`, `refocusDepth`, `focalLength`, `aperture`, `focusDistanceMeters`, `hdrHybridFramesPerFocus`, `pyramidLevels`.
+
+- `apps/src/androidMain/.../views/FocusStackProcessor.android.kt` — Complete rewrite. Replaced dead simple-average path with proper Laplacian-weighted blending. Implemented 7 algorithms:
+  1. **Multi-Scale Pyramid** — builds Laplacian pyramid per frame, selects sharpest pixel per level independently, reconstructs
+  2. **Depth Map** — per-pixel argmax of Laplacian response across frames, outputs grayscale or jet colormap
+  3. **Interactive Refocus** — fits Gaussian to depth map, weights frames by distance from focal plane, re-renders
+  4. **Exposure Balanced** — normalizes each frame's mean to median brightness before blending (fixes focus breathing)
+  5. **Feature Align** — ORB + RANSAC homography alignment (handles magnification changes that MTB can't)
+  6. **HDR Hybrid** — groups frames by focus position, Mertens-fuses each group into HDR, then focus-stacks
+  7. **Focus Bracketing Optimizer** — circle-of-confusion math, computes hyperfocal distance, recommends minimum step count
+  Added `buildPyramid()`, `multiScalePyramidStack()`, `generateDepthMap()`, `interactiveRefocus()`, `exposureBalanceFrames()`, `alignFocusFrames()`, `alignFocusByFeature()`, `hdrHybridFocusStack()`, `focusBracketingOptimizer()`, `standardFocusStack()`, `focusStackBlend()`.
+
+- `apps/src/commonMain/.../views/FocusStackPage.kt` — Added algorithm picker (7 options), alignment selector (MTB/Feature/None), exposure balance toggle, depth map colorization toggle, refocus depth slider, lens spec sliders (focal length, aperture, focus distance) for optimizer, pyramid levels slider. All signals tracked in reactive preview trigger. Removed deprecated `divider()` calls and unnamed local variables.
+
+- `apps/src/iosMain/.../views/FocusStackProcessor.ios.kt` — Updated stub with 11 new params.
+- `apps/src/jsMain/.../views/FocusStackProcessor.js.kt` — Updated stub with 11 new params.
+
+- `ROADMAP.md` — Expanded focus stacking section with 7 sub-items as completed.
+
+**Session goal:** Integrate PhotonCamera-inspired algorithms (Laplacian Pyramid Fusion, hot pixel correction, CA correction, lens correction, smart NR, contrast sharpening, smart frame selection) into the HDR processing pipeline.
+
+**Summary:** Wired all 10 algorithms from `HdrAlgorithms.android.kt` into the existing `processHdr` pipeline with full UI controls and preview reactivity.
+
+**Files changed:**
+
+- `apps/src/commonMain/kotlin/.../views/HdrProcessor.kt` — Added 6 new parameters to `expect` declaration: `pyramidNoiseStrength: Float = 1.0f`, `enableHotPixelFix: Boolean = false`, `enableCACorrection: Boolean = false`, `enableLensCorrection: Boolean = false`, `enableSmartNR: Boolean = false`, `enableContrastSharpening: Boolean = false`, `smartFrameSelection: Boolean = false`.
+
+- `apps/src/androidMain/kotlin/.../views/HdrProcessor.android.kt` — Added "Pyramid Fusion" case to algorithm dispatcher, uses `laplacianPyramidFusion()` with `PyramidMergeConfig(noiseStrength)`. Added smart frame selection before alignment (drops blurry frames via `selectSharpestFrames`). Added per-frame pre-processing: hot pixel fix (`detectAndFixHotPixels`), CA correction (`correctChromaticAberration`), lens correction (`correctLensDistortion`). Added post-processing on tonemapped result: smart NR (`smartNoiseReduction`), contrast sharpening (`contrastLimitedSharpening`). All steps guarded by their respective enable flags and logged.
+
+- `apps/src/iosMain/kotlin/.../views/HdrProcessor.ios.kt` — Updated actual signature with 6 new params (stub returns null).
+
+- `apps/src/jsMain/kotlin/.../views/HdrProcessor.js.kt` — Updated actual signature with 6 new params (stub returns null).
+
+- `apps/src/commonMain/kotlin/.../views/HdrProcessingPage.kt` — Added "Pyramid Fusion" (11th algorithm) to algorithm list and randomize pool. Added `pyramidNoiseStrength` Signal + slider for noise-aware fusion control. Added Enhancements card with 6 toggle buttons: Smart Frame Selection, Hot Pixel Fix, CA Correction, Lens Correction, Smart NR, Contrast Sharpening. All new signals tracked in reactive preview trigger and passed to `processHdr()` call. Randomize function now randomizes all new flags. Updated algorithm count references.

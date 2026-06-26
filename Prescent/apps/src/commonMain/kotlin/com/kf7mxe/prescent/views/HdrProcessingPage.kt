@@ -23,6 +23,7 @@ import kotlinx.coroutines.launch
 
 @Routable("/hdr-processing")
 class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenPage {
+    init { println("HdrProcessingPage created with ${images.size} images: $images") }
     override val title: Reactive<String> get() = Constant("HDR Processing")
 
     val alignmentOption = Signal("MTB")
@@ -59,6 +60,43 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
     // Hybrid / Contrast Optimizer shared
     val surrealAmount = Signal(0.5f)
 
+    // Pyramid Fusion params
+    val pyramidNoiseStrength = Signal(1.0f)
+
+    // Pre/Post-processing toggles
+    val smartFrameSelection = Signal(false)
+    val enableHotPixelFix = Signal(false)
+    val enableCACorrection = Signal(false)
+    val enableLensCorrection = Signal(false)
+    val enableSmartNR = Signal(false)
+    val enableContrastSharpening = Signal(false)
+
+    // Guided Fusion params
+    val guidedFusionLevels = Signal(4.0f)
+    val guidedFusionSigmaColor = Signal(30.0f)
+    val guidedFusionSigmaSpace = Signal(30.0f)
+
+    // Retinex params
+    val retinexSigma = Signal(30.0f)
+    val retinexCompression = Signal(0.5f)
+    val retinexGamma = Signal(0.8f)
+
+    // Saliency Fusion params
+    val saliencyWeight = Signal(0.4f)
+
+    // Pre/post toggles
+    val enableJointDenoise = Signal(false)
+    val enableDehaze = Signal(false)
+    val dehazePatchSize = Signal(15.0f)
+    val dehazeOmega = Signal(0.95f)
+    val superResolutionScale = Signal(0.0f)
+    val artisticEffect = Signal("None")
+    val artisticOrtonBlurRadius = Signal(15.0f)
+    val artisticOrtonOpacity = Signal(0.4f)
+    val artisticMiniatureFocusY = Signal(0.5f)
+    val artisticMiniatureBlurHeight = Signal(0.3f)
+    val artisticBokehRadius = Signal(25.0f)
+
     val processing = Signal(false)
     val previewProcessing = Signal(false)
     val resultImagePath = Signal<String?>(null)
@@ -67,7 +105,7 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
 
     private var previewJob: Job? = null
 
-    private val algorithms = listOf("Hybrid", "Contrast Optimizer", "Durand", "CLAHE Boost", "Mertens", "Reinhard", "Drago", "Mantiuk", "Fattal", "iCam06")
+    private val algorithms = listOf("Hybrid", "Contrast Optimizer", "Durand", "CLAHE Boost", "Mertens", "Pyramid Fusion", "Guided Fusion", "Retinex", "Saliency Fusion", "Reinhard", "Drago", "Mantiuk", "Fattal", "iCam06")
 
     override fun ElementWriter.CanAddTheme.render() {
         col {
@@ -221,6 +259,58 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
                             slider { range(0.0f, 2.0f, 0.1f); value.bind(saturationWeight) }
                         }
                     }
+                    // Pyramid Fusion (Laplacian multi-scale)
+                    shownWhen { tonemapAlgorithm() == "Pyramid Fusion" }.col {
+                        h2 { content = "Pyramid Fusion" }
+                        subtext("Multi-scale Laplacian pyramid merging with noise-aware weights. PhotonCamera-inspired.")
+                        col {
+                            text { ::content { "Noise Strength: ${pyramidNoiseStrength().fmt()}" } }
+                            slider { range(0.0f, 3.0f, 0.1f); value.bind(pyramidNoiseStrength) }
+                        }
+                    }
+                    // Guided Fusion (edge-aware multi-scale)
+                    shownWhen { tonemapAlgorithm() == "Guided Fusion" }.col {
+                        h2 { content = "Guided Fusion" }
+                        subtext("Edge-aware multi-scale blending via bilateral filter. No halos on high-contrast edges.")
+                        col {
+                            text { ::content { "Levels: ${guidedFusionLevels().fmt()}" } }
+                            slider { max = 6.0f; min = 2.0f; step = 1.0f; value.bind(guidedFusionLevels) }
+                        }
+                        col {
+                            text { ::content { "Sigma Color: ${guidedFusionSigmaColor().fmt()}" } }
+                            slider { max = 80.0f; min = 5.0f; step = 5.0f; value.bind(guidedFusionSigmaColor) }
+                        }
+                        col {
+                            text { ::content { "Sigma Space: ${guidedFusionSigmaSpace().fmt()}" } }
+                            slider { max = 80.0f; min = 5.0f; step = 5.0f; value.bind(guidedFusionSigmaSpace) }
+                        }
+                    }
+                    // Retinex Tone Mapping
+                    shownWhen { tonemapAlgorithm() == "Retinex" }.col {
+                        h2 { content = "Retinex Tone Mapping" }
+                        subtext("Decomposes into illumination × reflectance. Compresses lighting, preserves detail — very natural results.")
+                        col {
+                            text { ::content { "Sigma: ${retinexSigma().fmt()}" } }
+                            slider { max = 80.0f; min = 5.0f; step = 1.0f; value.bind(retinexSigma) }
+                        }
+                        col {
+                            text { ::content { "Compression: ${retinexCompression().fmt()}" } }
+                            slider { range(0.1f, 1.0f, 0.05f); value.bind(retinexCompression) }
+                        }
+                        col {
+                            text { ::content { "Gamma: ${retinexGamma().fmt()}" } }
+                            slider { range(0.3f, 1.5f, 0.05f); value.bind(retinexGamma) }
+                        }
+                    }
+                    // Saliency-Weighted Fusion
+                    shownWhen { tonemapAlgorithm() == "Saliency Fusion" }.col {
+                        h2 { content = "Saliency Fusion" }
+                        subtext("Weights each pixel by visual saliency. Keeps sky well-exposed while preserving attention-grabbing foreground detail.")
+                        col {
+                            text { ::content { "Saliency Weight: ${saliencyWeight().fmt()}" } }
+                            slider { range(0.0f, 1.0f, 0.05f); value.bind(saliencyWeight) }
+                        }
+                    }
                     // Mertens (Exposure Fusion)
                     shownWhen { tonemapAlgorithm() == "Mertens" }.col {
                         h2 { content = "Exposure Fusion Settings" }
@@ -328,6 +418,110 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
                     }
                 }
 
+                // ── Enhancements (pre/post processing) ──────────────────────
+                card.padded.col {
+                    h2 { content = "Enhancements" }
+                    subtext("Pre-process each frame before alignment and post-process the final result")
+                    col {
+                        row {
+                            toggleButton {
+                                text("Smart Frame Selection"); checked bind smartFrameSelection
+                            }
+                        }
+                        subtext("Drop blurry frames before processing")
+                    }
+                    col {
+                        row {
+                            toggleButton {
+                                text("Hot Pixel Fix"); checked bind enableHotPixelFix
+                            }
+                            toggleButton {
+                                text("CA Correction"); checked bind enableCACorrection
+                            }
+                        }
+                        row {
+                            toggleButton {
+                                text("Lens Correction"); checked bind enableLensCorrection
+                            }
+                            toggleButton {
+                                text("Smart NR"); checked bind enableSmartNR
+                            }
+                        }
+                        row {
+                            toggleButton {
+                                text("Contrast Sharpening"); checked bind enableContrastSharpening
+                            }
+                        }
+                    }
+                }
+
+                // ── Effects (dehaze, super-res, artistic) ────────────────────
+                card.padded.col {
+                    h2 { content = "Effects" }
+                    subtext("Post-processing filters applied to the final result")
+                    col {
+                        row { toggleButton { text("Dehaze"); checked bind enableDehaze } }
+                        shownWhen { enableDehaze() }.col {
+                            subtext("Dark channel prior — removes haze from landscapes")
+                            col {
+                                text { ::content { "Patch Size: ${dehazePatchSize().toInt()}" } }
+                                slider { max = 31.0f; min = 7.0f; step = 2.0f; value.bind(dehazePatchSize) }
+                            }
+                            col {
+                                text { ::content { "Strength: ${dehazeOmega().fmt()}" } }
+                                slider { range(0.5f, 1.0f, 0.05f); value.bind(dehazeOmega) }
+                            }
+                        }
+                    }
+                    col {
+                        text { ::content { "Super Resolution: ${if (superResolutionScale() < 1.5f) "Off" else "${superResolutionScale().toInt()}x"}" } }
+                        slider { range(0.0f, 4.0f, 1.0f); value.bind(superResolutionScale) }
+                        subtext("0 = off, 2-4 = upscale factor. 2x recommended for best quality.")
+                    }
+                    col {
+                        row { toggleButton { text("Joint Denoise"); checked bind enableJointDenoise } }
+                        shownWhen { enableJointDenoise() }.col {
+                            subtext("Uses well-exposed frame as guide to denoise dark brackets")
+                        }
+                    }
+                    col {
+                        h3 { content = "Artistic Effect" }
+                        row {
+                            listOf("None", "Orton", "Miniature", "Bokeh").forEach { opt ->
+                                expanding.toggleButton {
+                                    text(opt); checked bind artisticEffect.equalTo(opt)
+                                }
+                            }
+                        }
+                        shownWhen { artisticEffect() == "Orton" }.col {
+                            col {
+                                text { ::content { "Blur Radius: ${artisticOrtonBlurRadius().toInt()}" } }
+                                slider { max = 41.0f; min = 3.0f; step = 2.0f; value.bind(artisticOrtonBlurRadius) }
+                            }
+                            col {
+                                text { ::content { "Opacity: ${artisticOrtonOpacity().fmt()}" } }
+                                slider { range(0.1f, 1.0f, 0.05f); value.bind(artisticOrtonOpacity) }
+                            }
+                        }
+                        shownWhen { artisticEffect() == "Miniature" }.col {
+                            col {
+                                text { ::content { "Focus Y: ${artisticMiniatureFocusY().fmt()}" } }
+                                slider { range(0.0f, 1.0f, 0.05f); value.bind(artisticMiniatureFocusY) }
+                            }
+                            col {
+                                text { ::content { "Blur Height: ${artisticMiniatureBlurHeight().fmt()}" } }
+                                slider { range(0.1f, 0.8f, 0.05f); value.bind(artisticMiniatureBlurHeight) }
+                            }
+                        }
+                        shownWhen { artisticEffect() == "Bokeh" }.col {
+                            col {
+                                text { ::content { "Blur Radius: ${artisticBokehRadius().toInt()}" } }
+                                slider { max = 71.0f; min = 3.0f; step = 2.0f; value.bind(artisticBokehRadius) }
+                            }
+                        }
+                    }
+                }
+
                 // ── Randomize Button ─────────────────────────────────────────
                 padded.important.button {
                     text("Surprise Me!")
@@ -427,6 +621,31 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
                 icam06ChromaticAdaptation()
                 icam06LocalAdaptation()
                 surrealAmount()
+                pyramidNoiseStrength()
+                smartFrameSelection()
+                enableHotPixelFix()
+                enableCACorrection()
+                enableLensCorrection()
+                enableSmartNR()
+                enableContrastSharpening()
+                guidedFusionLevels()
+                guidedFusionSigmaColor()
+                guidedFusionSigmaSpace()
+                retinexSigma()
+                retinexCompression()
+                retinexGamma()
+                saliencyWeight()
+                enableJointDenoise()
+                enableDehaze()
+                dehazePatchSize()
+                dehazeOmega()
+                superResolutionScale()
+                artisticEffect()
+                artisticOrtonBlurRadius()
+                artisticOrtonOpacity()
+                artisticMiniatureFocusY()
+                artisticMiniatureBlurHeight()
+                artisticBokehRadius()
 
                 previewJob?.cancel()
                 previewJob = launch {
@@ -468,7 +687,32 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
                 icam06ChromaticAdaptation = icam06ChromaticAdaptation.value,
                 icam06LocalAdaptation = icam06LocalAdaptation.value,
                 surrealAmount = surrealAmount.value,
-                maxSize = if (fullSize) 0 else 1024
+                maxSize = if (fullSize) 0 else 1024,
+                pyramidNoiseStrength = pyramidNoiseStrength.value,
+                enableHotPixelFix = enableHotPixelFix.value,
+                enableCACorrection = enableCACorrection.value,
+                enableLensCorrection = enableLensCorrection.value,
+                enableSmartNR = enableSmartNR.value,
+                enableContrastSharpening = enableContrastSharpening.value,
+                smartFrameSelection = smartFrameSelection.value,
+                guidedFusionLevels = guidedFusionLevels.value.toInt(),
+                guidedFusionSigmaColor = guidedFusionSigmaColor.value,
+                guidedFusionSigmaSpace = guidedFusionSigmaSpace.value,
+                retinexSigma = retinexSigma.value,
+                retinexCompression = retinexCompression.value,
+                retinexGamma = retinexGamma.value,
+                saliencyWeight = saliencyWeight.value,
+                enableJointDenoise = enableJointDenoise.value,
+                enableDehaze = enableDehaze.value,
+                dehazePatchSize = dehazePatchSize.value.toInt(),
+                dehazeOmega = dehazeOmega.value,
+                superResolutionScale = superResolutionScale.value.toInt(),
+                artisticEffect = artisticEffect.value,
+                artisticOrtonBlurRadius = artisticOrtonBlurRadius.value.toInt(),
+                artisticOrtonOpacity = artisticOrtonOpacity.value,
+                artisticMiniatureFocusY = artisticMiniatureFocusY.value,
+                artisticMiniatureBlurHeight = artisticMiniatureBlurHeight.value,
+                artisticBokehRadius = artisticBokehRadius.value.toInt()
             )
             if (fullSize) {
                 resultImagePath.value = result
@@ -486,7 +730,7 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
 
     private fun randomizeSettings() {
         val rng = kotlin.random.Random
-        val hybridAlgorithms = listOf("Hybrid", "Contrast Optimizer", "Durand", "CLAHE Boost")
+        val hybridAlgorithms = listOf("Hybrid", "Contrast Optimizer", "Durand", "CLAHE Boost", "Pyramid Fusion", "Guided Fusion", "Retinex", "Saliency Fusion")
         val singleAlgorithms = listOf("Mertens", "Reinhard", "Drago", "Mantiuk", "Fattal", "iCam06")
 
         tonemapAlgorithm.value = if (rng.nextFloat() < 0.5f) {
@@ -514,5 +758,30 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
         icam06ChromaticAdaptation.value = 0.5f + rng.nextFloat() * 1.5f
         icam06LocalAdaptation.value = 0.5f + rng.nextFloat() * 4.0f
         surrealAmount.value = rng.nextFloat()
+        pyramidNoiseStrength.value = 0.5f + rng.nextFloat() * 2.5f
+        smartFrameSelection.value = rng.nextBoolean()
+        enableHotPixelFix.value = rng.nextBoolean()
+        enableCACorrection.value = rng.nextBoolean()
+        enableLensCorrection.value = rng.nextBoolean()
+        enableSmartNR.value = rng.nextBoolean()
+        enableContrastSharpening.value = rng.nextBoolean()
+        guidedFusionLevels.value = (2 + rng.nextInt(4)).toFloat()
+        guidedFusionSigmaColor.value = 10f + rng.nextFloat() * 50f
+        guidedFusionSigmaSpace.value = 10f + rng.nextFloat() * 50f
+        retinexSigma.value = 5f + rng.nextFloat() * 50f
+        retinexCompression.value = 0.2f + rng.nextFloat() * 0.6f
+        retinexGamma.value = 0.5f + rng.nextFloat() * 0.8f
+        saliencyWeight.value = rng.nextFloat() * 0.8f
+        enableJointDenoise.value = rng.nextBoolean()
+        enableDehaze.value = rng.nextBoolean()
+        dehazePatchSize.value = (7 + rng.nextInt(20) * 2).toFloat()
+        dehazeOmega.value = 0.7f + rng.nextFloat() * 0.25f
+        superResolutionScale.value = if (rng.nextBoolean()) 0f else (2 + rng.nextInt(2)).toFloat()
+        artisticEffect.value = listOf("None", "Orton", "Miniature", "Bokeh")[rng.nextInt(4)]
+        artisticOrtonBlurRadius.value = (5 + rng.nextInt(30) * 2).toFloat()
+        artisticOrtonOpacity.value = 0.2f + rng.nextFloat() * 0.6f
+        artisticMiniatureFocusY.value = 0.2f + rng.nextFloat() * 0.6f
+        artisticMiniatureBlurHeight.value = 0.2f + rng.nextFloat() * 0.4f
+        artisticBokehRadius.value = (5 + rng.nextInt(30) * 2).toFloat()
     }
 }

@@ -48,6 +48,19 @@ class CameraPage : Page, FullscreenPage {
     private val pendingSphereCaptures = mutableListOf<PendingSphereCapture>()
     val sphereCurrentCell = Signal<Pair<Int, Int>?>(null)
 
+    val isQuadBayer = Signal(false)
+    val quadBayerFrameCount = Signal(3)
+    val quadBayerAlgorithm = Signal(1)
+    val quadBayerCaptureTrigger = Signal(0)
+    val quadBayerPipeToHdr = Signal(false)
+    val quadBayerPipeToNightSight = Signal(false)
+    val quadBayerSaveDng = Signal(false)
+    private val quadBayerAlgorithmOptions = Signal(listOf(
+        0 to "Bin-to-Bayer",
+        1 to "Full Remosaic",
+        2 to "Edge-Guided"
+    ))
+
     val captureMode = Signal("hdr")
 
     // Grid: 3 rows (pitch) × 8 cols (azimuth), full 360° × 90°
@@ -128,7 +141,7 @@ class CameraPage : Page, FullscreenPage {
             }
 
             padded.row {
-                listOf("hdr" to "HDR", "single" to "Photo", "night" to "Night", "focus" to "Focus", "spatial" to "Spatial", "sphere" to "Sphere").forEach { (mode, label) ->
+                    listOf("hdr" to "HDR", "single" to "Photo", "night" to "Night", "focus" to "Focus", "spatial" to "Spatial", "sphere" to "Sphere", "quadbayer" to "Quad").forEach { (mode, label) ->
                     expanding.toggleButton {
                         text(label); checked bind captureMode.equalTo(mode)
                     }
@@ -142,7 +155,8 @@ class CameraPage : Page, FullscreenPage {
                     "night" -> { isHdrMode.value = false; isNightSight.value = true; isFocusStacking.value = false; isSpatial.value = false }
                     "focus" -> { isHdrMode.value = false; isNightSight.value = false; isFocusStacking.value = true; isSpatial.value = false }
                     "spatial" -> { isHdrMode.value = false; isNightSight.value = false; isFocusStacking.value = false; isSpatial.value = true }
-                    "sphere" -> { isHdrMode.value = false; isNightSight.value = false; isFocusStacking.value = false; isSpatial.value = false }
+                    "sphere" -> { isHdrMode.value = false; isNightSight.value = false; isFocusStacking.value = false; isSpatial.value = false; isQuadBayer.value = false }
+                    "quadbayer" -> { isHdrMode.value = false; isNightSight.value = false; isFocusStacking.value = false; isSpatial.value = false; isQuadBayer.value = true }
                 }
             }
 
@@ -154,6 +168,12 @@ class CameraPage : Page, FullscreenPage {
                     sphereGhostFrames.value = emptyList()
                     pendingSphereCaptures.clear()
                     sphereCurrentCell.value = null
+                }
+            }
+
+            reactive {
+                if (captureMode() != "quadbayer" && isQuadBayer()) {
+                    isQuadBayer.value = false
                 }
             }
 
@@ -210,6 +230,26 @@ class CameraPage : Page, FullscreenPage {
                     sphereGridData = sphereGrid,
                     sphereCurrentCell = sphereCurrentCell,
                     sphereGhostFrames = sphereGhostFrames,
+                    isQuadBayer = isQuadBayer,
+                    quadBayerFrameCount = quadBayerFrameCount,
+                    quadBayerAlgorithm = quadBayerAlgorithm,
+                    quadBayerCaptureTrigger = quadBayerCaptureTrigger,
+                    quadBayerPipeToHdr = quadBayerPipeToHdr,
+                    quadBayerPipeToNightSight = quadBayerPipeToNightSight,
+                    quadBayerSaveDng = quadBayerSaveDng,
+                    onQuadBayerCaptured = { paths ->
+                        println("CameraPage: onQuadBayerCaptured with ${paths.size} paths: $paths")
+                        if (paths.isNotEmpty()) {
+                            when {
+                                quadBayerPipeToHdr.value ->
+                                    GlobalNavigator.main.navigate(HdrProcessingPage(paths))
+                                quadBayerPipeToNightSight.value ->
+                                    GlobalNavigator.main.navigate(NightSightPage(paths))
+                                else ->
+                                    GlobalNavigator.main.navigate(GalleryPage())
+                            }
+                        }
+                    },
                 )
 
                 shownWhen { isHdrMode() && !isNightSight() }.frame {
@@ -283,6 +323,51 @@ class CameraPage : Page, FullscreenPage {
                         text { ::content { "${sphereFrames().size} captured" } }
                     }
                 }
+
+                // ── Quad Bayer controls overlay ─────────────────────────────
+                shownWhen { captureMode() == "quadbayer" }.frame {
+                    atTopEnd.card.padded.col {
+                        text("Algorithm:")
+                        forEach(quadBayerAlgorithmOptions) { (idx, label) ->
+                            toggleButton {
+                                text(label)
+                                checked bind quadBayerAlgorithm.equalTo(idx)
+                            }
+                        }
+                        text("Frames:")
+                        row {
+                            forEach(Signal(listOf(1 to "1", 2 to "2", 3 to "3"))) { (v, label) ->
+                                toggleButton {
+                                    text(label)
+                                    checked bind quadBayerFrameCount.equalTo(v)
+                                }
+                            }
+                        }
+                        row {
+                            toggleButton {
+                                text("Pipe → HDR")
+                                checked bind quadBayerPipeToHdr
+                            }
+                            toggleButton {
+                                text("Pipe → Night")
+                                checked bind quadBayerPipeToNightSight
+                            }
+                        }
+                        row {
+                            toggleButton {
+                                text("Save DNG")
+                                checked bind quadBayerSaveDng
+                            }
+                        }
+                        reactive {
+                            val pipeHdr = quadBayerPipeToHdr()
+                            val pipeNight = quadBayerPipeToNightSight()
+                            if (pipeHdr && pipeNight) {
+                                quadBayerPipeToNightSight.value = false
+                            }
+                        }
+                    }
+                }
             }
 
             // ── Bottom Controls ────────────────────────────────────────────
@@ -309,6 +394,7 @@ class CameraPage : Page, FullscreenPage {
                             isNightSight.value -> nightSightCaptureTrigger.value += 1
                             isFocusStacking.value -> focusStackCaptureTrigger.value += 1
                             isSpatial.value -> spatialCaptureTrigger.value += 1
+                            isQuadBayer.value -> quadBayerCaptureTrigger.value += 1
                             else -> shutterTrigger.value += 1
                         }
                     }

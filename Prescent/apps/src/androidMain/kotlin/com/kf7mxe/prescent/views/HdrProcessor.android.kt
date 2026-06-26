@@ -65,7 +65,32 @@ actual suspend fun processHdr(
     icam06ChromaticAdaptation: Float,
     icam06LocalAdaptation: Float,
     surrealAmount: Float,
-    maxSize: Int
+    maxSize: Int,
+    pyramidNoiseStrength: Float,
+    enableHotPixelFix: Boolean,
+    enableCACorrection: Boolean,
+    enableLensCorrection: Boolean,
+    enableSmartNR: Boolean,
+    enableContrastSharpening: Boolean,
+    smartFrameSelection: Boolean,
+    guidedFusionLevels: Int,
+    guidedFusionSigmaColor: Float,
+    guidedFusionSigmaSpace: Float,
+    retinexSigma: Float,
+    retinexCompression: Float,
+    retinexGamma: Float,
+    saliencyWeight: Float,
+    enableJointDenoise: Boolean,
+    enableDehaze: Boolean,
+    dehazePatchSize: Int,
+    dehazeOmega: Float,
+    superResolutionScale: Int,
+    artisticEffect: String,
+    artisticOrtonBlurRadius: Int,
+    artisticOrtonOpacity: Float,
+    artisticMiniatureFocusY: Float,
+    artisticMiniatureBlurHeight: Float,
+    artisticBokehRadius: Int
 ): String? = withContext(Dispatchers.IO) {
     val context = AndroidAppContext.applicationCtx
     val mats = mutableListOf<Mat>()
@@ -98,7 +123,37 @@ actual suspend fun processHdr(
 
         if (mats.size < 2) return@withContext null
 
-        val alignedMats = alignImages(mats, alignment)
+        // Smart frame selection: drop blurry frames
+        val filteredMats = if (smartFrameSelection && mats.size > 2) {
+            selectSharpestFrames(mats, 0.75)
+        } else mats
+        Log.d("HdrProcessor", "Smart selection: ${mats.size} → ${filteredMats.size} frames")
+
+        // Joint denoise: use well-exposed frame as guide to denoise underexposed
+        val denoisedMats = if (enableJointDenoise) {
+            Log.d("HdrProcessor", "Applying joint denoise")
+            jointDenoiseBracketPair(filteredMats)
+        } else filteredMats
+
+        // Per-frame pre-processing (hot pixel, CA, lens distortion)
+        val preprocessed = denoisedMats.map { mat ->
+            var m = mat
+            if (enableHotPixelFix) {
+                Log.d("HdrProcessor", "Applying hot pixel fix")
+                m = detectAndFixHotPixels(m)
+            }
+            if (enableCACorrection) {
+                Log.d("HdrProcessor", "Applying chromatic aberration correction")
+                m = correctChromaticAberration(m)
+            }
+            if (enableLensCorrection) {
+                Log.d("HdrProcessor", "Applying lens distortion correction")
+                m = correctLensDistortion(m)
+            }
+            m
+        }
+
+        val alignedMats = alignImages(preprocessed, alignment)
         val croppedMats = if (cropAfterAlignment) cropValidRegion(alignedMats) else alignedMats
         if (croppedMats.size < 2) return@withContext null
 
@@ -125,6 +180,43 @@ actual suspend fun processHdr(
             "Mertens" -> {
                 val merger = Photo.createMergeMertens(contrastWeight, saturationWeight, exposureWeight)
                 merger.process(croppedMats, resultMat)
+            }
+            "Pyramid Fusion" -> {
+                val cfg = PyramidMergeConfig(noiseStrength = pyramidNoiseStrength.toDouble())
+                val pyramidResult = laplacianPyramidFusion(croppedMats, cfg)
+                pyramidResult.convertTo(resultMat, CvType.CV_32FC3, 1.0 / 255.0)
+                pyramidResult.release()
+            }
+            "Guided Fusion" -> {
+                val cfg = GuidedFusionConfig(
+                    levels = guidedFusionLevels,
+                    sigmaColor = guidedFusionSigmaColor.toDouble(),
+                    sigmaSpace = guidedFusionSigmaSpace.toDouble()
+                )
+                val guidedResult = multiScaleGuidedFusion(croppedMats, cfg)
+                guidedResult.convertTo(resultMat, CvType.CV_32FC3, 1.0 / 255.0)
+                guidedResult.release()
+            }
+            "Retinex" -> {
+                val cfg = RetinexConfig(
+                    gaussianSigma = retinexSigma.toDouble(),
+                    compression = retinexCompression.toDouble(),
+                    gamma = retinexGamma.toDouble()
+                )
+                val retinexResult = retinexToneMap(croppedMats, cfg)
+                retinexResult.convertTo(resultMat, CvType.CV_32FC3, 1.0 / 255.0)
+                retinexResult.release()
+            }
+            "Saliency Fusion" -> {
+                val cfg = SaliencyFusionConfig(
+                    saliencyWeight = saliencyWeight.toDouble(),
+                    contrastWeight = contrastWeight.toDouble(),
+                    saturationWeight = saturationWeight.toDouble(),
+                    exposureWeight = exposureWeight.toDouble()
+                )
+                val salResult = saliencyWeightedFusion(croppedMats, cfg)
+                salResult.convertTo(resultMat, CvType.CV_32FC3, 1.0 / 255.0)
+                salResult.release()
             }
             "Reinhard", "Drago", "Mantiuk", "Fattal", "iCam06" -> {
                 val numImages = croppedMats.size
@@ -182,16 +274,58 @@ actual suspend fun processHdr(
         if (resultMat.empty()) return@withContext null
 
         // Ghost reduction: post-process on tonemapped float output (doesn't corrupt exposure brackets)
-        val finalFloat = if (ghostingStrength > 0.01f) {
+        val ghostFree = if (ghostingStrength > 0.01f) {
             val reduced = Mat()
             reduceGhostArtifacts(resultMat, reduced, ghostingStrength)
             resultMat.release()
             reduced
         } else resultMat
 
-        val final8bit = Mat()
-        finalFloat.convertTo(final8bit, CvType.CV_8UC3, 255.0)
-        finalFloat.release()
+        // Post-processing on uint8 (smart NR, contrast sharpening, dehaze, artistic)
+        var post8 = Mat()
+        ghostFree.convertTo(post8, CvType.CV_8UC3, 255.0)
+        ghostFree.release()
+
+        if (enableSmartNR) {
+            Log.d("HdrProcessor", "Applying smart noise reduction")
+            post8 = smartNoiseReduction(post8)
+        }
+        if (enableContrastSharpening) {
+            Log.d("HdrProcessor", "Applying contrast limited sharpening")
+            post8 = contrastLimitedSharpening(post8)
+        }
+        if (enableDehaze) {
+            Log.d("HdrProcessor", "Applying dark channel prior dehazing")
+            post8 = darkChannelPriorDehaze(post8, DehazeConfig(
+                patchSize = dehazePatchSize, omega = dehazeOmega.toDouble()
+            ))
+        }
+        if (superResolutionScale > 1) {
+            Log.d("HdrProcessor", "Applying super resolution ${superResolutionScale}x")
+            val srList = listOf(post8)
+            post8 = multiFrameSuperResolution(srList, SuperResConfig(scaleFactor = superResolutionScale))
+        }
+        if (artisticEffect != "None") {
+            Log.d("HdrProcessor", "Applying artistic effect: $artisticEffect")
+            val effect = when (artisticEffect) {
+                "Orton" -> ArtisticEffect.ORTON
+                "Miniature" -> ArtisticEffect.MINIATURE
+                "Bokeh" -> ArtisticEffect.BOKEH
+                else -> null
+            }
+            if (effect != null) {
+                post8 = applyArtisticEffect(post8, ArtisticConfig(
+                    effect = effect,
+                    ortonBlurRadius = artisticOrtonBlurRadius,
+                    ortonOpacity = artisticOrtonOpacity.toDouble(),
+                    miniatureFocusY = artisticMiniatureFocusY.toDouble(),
+                    miniatureBlurHeight = artisticMiniatureBlurHeight.toDouble(),
+                    bokehRadius = artisticBokehRadius
+                ))
+            }
+        }
+
+        val final8bit = post8
 
         val resultBitmap = Bitmap.createBitmap(final8bit.cols(), final8bit.rows(), Bitmap.Config.ARGB_8888)
         Utils.matToBitmap(final8bit, resultBitmap)

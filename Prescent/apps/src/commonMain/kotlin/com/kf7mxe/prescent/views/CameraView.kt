@@ -24,12 +24,16 @@ expect fun ElementWriter.cameraView(
     onSpatialCaptured: ((List<String>) -> Unit)? = null,
     // Photo Sphere — fires live (azimuth, pitch) updates for guidance overlay
     onSphereOrientationUpdate: ((Pair<Float, Float>) -> Unit)? = null,
-    // Photo Sphere — fires with the orientation of each captured frame
     onSphereFrameOrientation: ((Float, Float) -> Unit)? = null,
-    // Photo Sphere — grid coverage state for overlay rendering
     sphereGridData: Signal<List<List<Boolean>>> = Signal(emptyList()),
-    // Photo Sphere — current cell (row, col) being pointed at, or null
     sphereCurrentCell: Signal<Pair<Int, Int>?> = Signal(null),
-    // Photo Sphere — captured frames with orientations for ghost preview
-    sphereGhostFrames: Signal<List<SphereGhostFrame>> = Signal(emptyList())
+    sphereGhostFrames: Signal<List<SphereGhostFrame>> = Signal(emptyList()),
+    isQuadBayer: Signal<Boolean> = Signal(false),
+    quadBayerFrameCount: Signal<Int> = Signal(3),
+    quadBayerAlgorithm: Signal<Int> = Signal(1),
+    quadBayerCaptureTrigger: Signal<Int> = Signal(0),
+    quadBayerPipeToHdr: Signal<Boolean> = Signal(false),
+    quadBayerPipeToNightSight: Signal<Boolean> = Signal(false),
+    quadBayerSaveDng: Signal<Boolean> = Signal(false),
+    onQuadBayerCaptured: ((List<String>) -> Unit)? = null
 )

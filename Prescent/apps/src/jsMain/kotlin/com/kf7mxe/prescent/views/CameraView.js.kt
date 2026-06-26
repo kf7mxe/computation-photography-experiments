@@ -27,7 +27,15 @@ actual fun ElementWriter.cameraView(
     onSphereFrameOrientation: ((Float, Float) -> Unit)?,
     sphereGridData: Signal<List<List<Boolean>>>,
     sphereCurrentCell: Signal<Pair<Int, Int>?>,
-    sphereGhostFrames: Signal<List<SphereGhostFrame>>
+    sphereGhostFrames: Signal<List<SphereGhostFrame>>,
+    isQuadBayer: Signal<Boolean>,
+    quadBayerFrameCount: Signal<Int>,
+    quadBayerAlgorithm: Signal<Int>,
+    quadBayerCaptureTrigger: Signal<Int>,
+    quadBayerPipeToHdr: Signal<Boolean>,
+    quadBayerPipeToNightSight: Signal<Boolean>,
+    quadBayerSaveDng: Signal<Boolean>,
+    onQuadBayerCaptured: ((List<String>) -> Unit)?
 ) {
     text("Camera not available in browser")
 }
