@@ -325,9 +325,7 @@ fun darkChannelPriorDehaze(
     // 3. Transmission map
     val normalized = Mat()
     Core.divide(floatMat, Scalar(airlight[0], airlight[1], airlight[2]), normalized)
-    val transDark = Mat()
-    Core.min(channels[0], channels[1], transDark)
-    // Actually compute on normalized
+    // Compute dark channel on the normalized image
     val normChannels = mutableListOf<Mat>()
     Core.split(normalized, normChannels)
     val trans = Mat()
@@ -458,9 +456,13 @@ fun multiFrameSuperResolution(
         channels.forEach { it.release() }
     }
 
-    // Normalize
+    // Normalize: expand weightMap to 3-channel to match the 3-channel accumulator
     val result = Mat()
-    Core.divide(accumulator, weightMap, result)
+    val weightMap3ch = Mat()
+    val wChans = listOf(weightMap, weightMap, weightMap)
+    Core.merge(wChans, weightMap3ch)
+    Core.divide(accumulator, weightMap3ch, result)
+    weightMap3ch.release()
     Core.max(result, Scalar(0.0), result)
     Core.min(result, Scalar(1.0), result)
 
@@ -474,7 +476,7 @@ fun multiFrameSuperResolution(
         val ratio = Mat(); Core.divide(enhanced, lum, ratio)
         val chans = mutableListOf<Mat>(); Core.split(result, chans)
         for (ch in chans) { Core.multiply(ch, ratio, ch) }
-        val sharpened = Mat(); Core.merge(chans, result)
+        Core.merge(chans, result)  // merge back into result (no unused "sharpened" Mat)
         lum.release(); blurred.release(); detail.release(); enhanced.release()
         ratio.release(); chans.forEach { it.release() }
     }
@@ -934,34 +936,42 @@ fun laplacianPyramidFusion(
         firstLap.copyTo(merged)
 
         // Merge subsequent frames with noise-aware weighting
+        // Pre-allocate a ones Mat for this level (reused across frames)
+        val onesLevel = Mat.ones(firstLap.size(), firstLap.type())
+
         for (f in 1 until numFrames) {
-            val currentLap = pyramids[f].laplace[level]
+            // Clone: do NOT mutate or release the pyramid's stored Laplacian
+            val currentLap = pyramids[f].laplace[level].clone()
             val currentGauss = pyramids[f].gauss[level + 1]
             val refGauss = pyramids[0].gauss[level + 1]
 
-            // Per-pixel noise-aware blend weight
+            // Per-pixel noise-aware blend weight:
+            // Large diff → pixel is a ghost candidate → low weight for new frame
+            // Small diff → frames agree → higher blend weight 1/(f+1)
             val diff = Mat()
             Core.absdiff(currentGauss, refGauss, diff)
 
-            // Where difference > noise, use first frame (reject ghosts)
-            // Where difference < noise, blend with weight 1/(f+1)
             val noiseThreshold = baseNoiseS * 0.5 + baseNoiseO
-            val weight = Mat()
-            Core.divide(diff, Scalar(noiseThreshold * 2.0), weight)
-            Core.min(weight, Scalar(1.0), weight)
-            Core.max(weight, Scalar(1.0 / (f + 1)), weight)
+            // Normalize: 0 when diff=0, 1 when diff >= 2*noiseThreshold
+            val ghostWeight = Mat()
+            Core.divide(diff, Scalar(noiseThreshold * 2.0), ghostWeight)
+            Core.min(ghostWeight, Scalar(1.0), ghostWeight)
 
+            // blendWeight = (1 - ghostWeight) * blendFactor → ghost pixels get weight 0
             val blendFactor = 1.0 / (f + 1)
             val contribution = Mat()
-            Core.multiply(weight, Scalar(blendFactor), contribution)
+            Core.subtract(onesLevel, ghostWeight, contribution)
+            Core.multiply(contribution, Scalar(blendFactor), contribution)
+
             Core.multiply(currentLap, contribution, currentLap)
             Core.multiply(merged, Scalar(1.0 - blendFactor), merged)
             Core.add(merged, currentLap, merged)
 
-            diff.release(); weight.release(); contribution.release()
-            currentLap.release(); currentGauss.release(); refGauss.release()
+            diff.release(); ghostWeight.release(); contribution.release()
+            currentLap.release()
         }
 
+        onesLevel.release()
         mergedLaplace.add(merged)
     }
 

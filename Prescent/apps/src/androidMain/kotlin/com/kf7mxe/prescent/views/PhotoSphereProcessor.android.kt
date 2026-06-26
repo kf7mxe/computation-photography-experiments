@@ -3,6 +3,7 @@ package com.kf7mxe.prescent.views
 import android.content.ContentValues
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.ExifInterface
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -24,6 +25,8 @@ import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.sin
 import kotlin.math.tan
+import kotlin.math.atan2
+import kotlin.math.sqrt
 
 actual suspend fun processPhotoSphere(
     images: List<String>,
@@ -37,7 +40,7 @@ actual suspend fun processPhotoSphere(
     if (images.size < 2) return@withContext null
 
     try {
-        // 1. Load all images
+        // 1. Load all images and read EXIF rotation for each
         fun loadMat(path: String): Mat? {
             val opts = BitmapFactory.Options()
             if (isPreview) {
@@ -53,13 +56,20 @@ actual suspend fun processPhotoSphere(
             return rgb
         }
 
+        val exifRotations = images.map { path ->
+            try {
+                val exif = ExifInterface(path)
+                exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            } catch (_: Exception) { ExifInterface.ORIENTATION_NORMAL }
+        }
+
         val mats = images.mapNotNull { loadMat(it) }
         if (mats.size < 2) { mats.forEach { it.release() }; return@withContext null }
 
         val useOrientations = orientations.size >= images.size
 
         val resultPath = if (useOrientations) {
-            processSphereOrientations(mats, orientations, isPreview)
+            processSphereOrientations(mats, orientations, exifRotations, isPreview)
         } else {
             processHomographyFallback(mats, isPreview)
         }
@@ -75,6 +85,7 @@ actual suspend fun processPhotoSphere(
 private fun processSphereOrientations(
     mats: List<Mat>,
     orientations: List<Pair<Float, Float>>,
+    exifRotations: List<Int>,
     isPreview: Boolean
 ): String? {
     val context = AndroidAppContext.applicationCtx
@@ -82,106 +93,188 @@ private fun processSphereOrientations(
 
     val imW = mats[0].cols(); val imH = mats[0].rows()
 
-    // Estimate camera intrinsics (~70° horizontal FOV for phone main camera)
+    // Determine sensor-native dimensions from the first image's EXIF rotation
+    val firstRot = exifRotations.getOrElse(0) { ExifInterface.ORIENTATION_NORMAL }
+    val sensorW: Int; val sensorH: Int
+    when (firstRot) {
+        ExifInterface.ORIENTATION_ROTATE_90, ExifInterface.ORIENTATION_ROTATE_270 -> {
+            sensorW = imH; sensorH = imW
+        }
+        else -> {
+            sensorW = imW; sensorH = imH
+        }
+    }
+
+    // Estimate camera intrinsics using the sensor's native dimensions
     val hfovDeg = 70.0
-    val f = (imW / 2.0) / tan(Math.toRadians(hfovDeg / 2.0))
-    val cx = imW / 2.0; val cy = imH / 2.0
+    val sensorLongPx = maxOf(sensorW, sensorH)
+    val f = (sensorLongPx / 2.0) / tan(Math.toRadians(hfovDeg / 2.0))
+    val cx_s = sensorW / 2.0
+    val cy_s = sensorH / 2.0
+
+    Log.d("PhotoSphere", "Sensor: ${sensorW}x$sensorH, image: ${imW}x$imH, first EXIF: $firstRot")
 
     // Equirectangular output (2:1)
     val eqW = 4096; val eqH = 2048
     val acc = Mat(eqH, eqW, CvType.CV_32FC3, Scalar(0.0, 0.0, 0.0))
     val weightSum = Mat(eqH, eqW, CvType.CV_32F, Scalar(0.0))
 
+    // Precompute spherical direction vectors for all equirectangular pixels
+    val vx = FloatArray(eqH * eqW)
+    val vy = FloatArray(eqH * eqW)
+    val vz = FloatArray(eqH * eqW)
+    var idx = 0
+    for (row in 0 until eqH) {
+        val lat = Math.PI / 2.0 - (row.toDouble() / eqH) * Math.PI
+        val cosLat = cos(lat)
+        val sinLat = sin(lat)
+        for (col in 0 until eqW) {
+            val lon = (col.toDouble() / eqW) * 2.0 * Math.PI - Math.PI
+            vx[idx] = (cos(lon) * cosLat).toFloat()
+            vy[idx] = sinLat.toFloat()
+            vz[idx] = (sin(lon) * cosLat).toFloat()
+            idx++
+        }
+    }
+
     val refAz = orientations[0].first
 
     for (i in mats.indices) {
         val (azimuth, pitch) = orientations[i]
         val mat = mats[i]
+        val exifRot = exifRotations.getOrElse(i) { ExifInterface.ORIENTATION_NORMAL }
 
         val theta = Math.toRadians((azimuth - refAz).toDouble())
         val phi = Math.toRadians(pitch.toDouble())
 
-        val cosT = cos(theta); val sinT = sin(theta)
-        val cosP = cos(phi); val sinP = sin(phi)
+        val cosT = cos(theta).toFloat()
+        val sinT = sin(theta).toFloat()
+        val cosP = cos(phi).toFloat()
+        val sinP = sin(phi).toFloat()
 
         // Camera axes in world space: X=right, Y=down, Z=optical axis
-        val xCamX = cosT; val xCamY = 0.0; val xCamZ = -sinT
+        // These map to sensor-native pixel coordinates:
+        //   sensor_u = f * camX / camZ + cx_s
+        //   sensor_v = f * camY_ / camZ + cy_s
+        val xCamX = cosT; val xCamY = 0f; val xCamZ = -sinT
         val yCamX = sinP * sinT; val yCamY = -cosP; val yCamZ = sinP * cosT
         val zCamX = sinT * cosP; val zCamY = sinP; val zCamZ = cosT * cosP
 
+        val mapXData = FloatArray(eqH * eqW)
+        val mapYData = FloatArray(eqH * eqW)
+        val weightData = FloatArray(eqH * eqW)
+
+        var pIdx = 0
         for (row in 0 until eqH) {
             for (col in 0 until eqW) {
-                val lon = (col.toDouble() / eqW) * 2.0 * Math.PI - Math.PI
-                val lat = Math.PI / 2.0 - (row.toDouble() / eqH) * Math.PI
+                val px = vx[pIdx]; val py = vy[pIdx]; val pz = vz[pIdx]
+                val camX = px * xCamX + py * xCamY + pz * xCamZ
+                val camY_ = px * yCamX + py * yCamY + pz * yCamZ
+                val camZ = px * zCamX + py * zCamY + pz * zCamZ
 
-                val vx = cos(lon) * cos(lat)
-                val vy = sin(lat)
-                val vz = sin(lon) * cos(lat)
+                if (camZ > 0.001f) {
+                    // Project to sensor-native coordinates
+                    val sensorU = f * camX / camZ + cx_s
+                    val sensorV = f * camY_ / camZ + cy_s
 
-                val camX = vx * xCamX + vy * xCamY + vz * xCamZ
-                val camY_ = vx * yCamX + vy * yCamY + vz * yCamZ
-                val camZ = vx * zCamX + vy * zCamY + vz * zCamZ
-
-                if (camZ > 0.001) {
-                    val imgU = f * camX / camZ + cx
-                    val imgV = f * camY_ / camZ + cy
-
-                    if (imgU >= 0.0 && imgU < imW - 1 && imgV >= 0.0 && imgV < imH - 1) {
-                        val u1 = imgU.toInt(); val v1 = imgV.toInt()
-                        val u2 = (u1 + 1).coerceAtMost(imW - 1)
-                        val v2 = (v1 + 1).coerceAtMost(imH - 1)
-                        val fx = imgU - u1; val fy = imgV - v1
-
-                        val tl = mat.get(v1, u1)
-                        val tr = mat.get(v1, u2)
-                        val bl = mat.get(v2, u1)
-                        val br = mat.get(v2, u2)
-
-                        val r = tl[0] * (1.0 - fx) * (1.0 - fy) +
-                                tr[0] * fx * (1.0 - fy) +
-                                bl[0] * (1.0 - fx) * fy +
-                                br[0] * fx * fy
-                        val g = tl[1] * (1.0 - fx) * (1.0 - fy) +
-                                tr[1] * fx * (1.0 - fy) +
-                                bl[1] * (1.0 - fx) * fy +
-                                br[1] * fx * fy
-                        val b = tl[2] * (1.0 - fx) * (1.0 - fy) +
-                                tr[2] * fx * (1.0 - fy) +
-                                bl[2] * (1.0 - fx) * fy +
-                                br[2] * fx * fy
-
-                        val dx = (imgU - cx) / cx; val dy = (imgV - cy) / cy
-                        val w = exp(-(dx * dx + dy * dy) * 2.0)
-
-                        val cur = acc.get(row, col)
-                        acc.put(row, col, floatArrayOf(
-                            (cur[0] + r * w).toFloat(),
-                            (cur[1] + g * w).toFloat(),
-                            (cur[2] + b * w).toFloat()
-                        ))
-                        val ws = weightSum.get(row, col)[0]
-                        weightSum.put(row, col, floatArrayOf((ws + w).toFloat()))
+                    // Convert sensor → image coordinates using EXIF rotation
+                    val imgU: Double
+                    val imgV: Double
+                    when (exifRot) {
+                        ExifInterface.ORIENTATION_ROTATE_90 -> {
+                            // 90° CW: image_u = sensor_v, image_v = sensorW - sensor_u
+                            imgU = sensorV
+                            imgV = sensorW.toDouble() - sensorU
+                        }
+                        ExifInterface.ORIENTATION_ROTATE_180 -> {
+                            imgU = sensorW.toDouble() - sensorU
+                            imgV = sensorH.toDouble() - sensorV
+                        }
+                        ExifInterface.ORIENTATION_ROTATE_270 -> {
+                            // 90° CCW: image_u = sensorH - sensorV, image_v = sensor_u
+                            imgU = sensorH.toDouble() - sensorV
+                            imgV = sensorU
+                        }
+                        else -> {
+                            imgU = sensorU
+                            imgV = sensorV
+                        }
                     }
+
+                    if (imgU >= 0f && imgU < imW - 1 && imgV >= 0f && imgV < imH - 1) {
+                        mapXData[pIdx] = imgU.toFloat()
+                        mapYData[pIdx] = imgV.toFloat()
+                        // Weight based on distance from sensor optical center (in sensor coords)
+                        val dx = (sensorU - cx_s) / cx_s
+                        val dy = (sensorV - cy_s) / cy_s
+                        weightData[pIdx] = exp(-(dx * dx + dy * dy) * 2.0).toFloat()
+                    } else {
+                        mapXData[pIdx] = -1f
+                        mapYData[pIdx] = -1f
+                        weightData[pIdx] = 0f
+                    }
+                } else {
+                    mapXData[pIdx] = -1f
+                    mapYData[pIdx] = -1f
+                    weightData[pIdx] = 0f
                 }
+                pIdx++
             }
         }
-    }
 
-    // Normalize accumulated RGB by weight
-    val result = Mat(eqH, eqW, CvType.CV_32FC3, Scalar(0.0, 0.0, 0.0))
-    for (row in 0 until eqH) {
-        for (col in 0 until eqW) {
-            val w = weightSum.get(row, col)[0]
-            if (w > 0.01) {
-                val c = acc.get(row, col)
-                result.put(row, col, floatArrayOf(
-                    (c[0] / w).toFloat(), (c[1] / w).toFloat(), (c[2] / w).toFloat()
-                ))
-            }
+        val mapX = Mat(eqH, eqW, CvType.CV_32F)
+        val mapY = Mat(eqH, eqW, CvType.CV_32F)
+        val weightMap = Mat(eqH, eqW, CvType.CV_32F)
+        mapX.put(0, 0, mapXData)
+        mapY.put(0, 0, mapYData)
+        weightMap.put(0, 0, weightData)
+
+        val warped = Mat()
+        Imgproc.remap(mat, warped, mapX, mapY, Imgproc.INTER_LINEAR, Core.BORDER_CONSTANT, Scalar(0.0, 0.0, 0.0))
+
+        val warped32f = Mat()
+        warped.convertTo(warped32f, CvType.CV_32FC3, 1.0)
+        warped.release()
+
+        val channels = mutableListOf<Mat>()
+        Core.split(warped32f, channels)
+        warped32f.release()
+
+        for (ch in channels) {
+            Core.multiply(ch, weightMap, ch)
         }
+
+        val weighted = Mat()
+        Core.merge(channels, weighted)
+        channels.forEach { it.release() }
+
+        Core.add(acc, weighted, acc)
+        weighted.release()
+
+        Core.add(weightSum, weightMap, weightSum)
+        weightMap.release(); mapX.release(); mapY.release()
     }
 
-    acc.release(); weightSum.release()
+    // Normalize accumulated RGB by weight: result = acc / weightSum (per-channel)
+    val channels = mutableListOf<Mat>()
+    Core.split(acc, channels)
+    acc.release()
+
+    val mask = Mat()
+    Core.compare(weightSum, Scalar(0.01), mask, Core.CMP_GT)
+
+    for (ch in channels) {
+        val temp = Mat()
+        Core.divide(ch, weightSum, temp)
+        temp.copyTo(ch, mask)
+        temp.release()
+    }
+    mask.release()
+    weightSum.release()
+
+    val result = Mat()
+    Core.merge(channels, result)
+    channels.forEach { it.release() }
 
     // Convert to RGBA for bitmap output
     val rgbResult = Mat(eqH, eqW, CvType.CV_8UC3)
@@ -290,14 +383,27 @@ private fun embedXmpMetadata(jpegPath: String, fullW: Int, fullH: Int, headingDe
         val jpegFile = File(jpegPath)
         val jpegBytes = jpegFile.readBytes()
 
-        // Find JPEG EOI marker (0xFFD9) and insert APP1 before it
+        // Find JPEG SOS marker (0xFFDA) and insert APP1 before it
+        // XMP must be in the header area between SOI and SOS
         var insertAt = -1
-        for (i in jpegBytes.size - 2 downTo 0) {
+        var i = 2
+        while (i < jpegBytes.size - 1) {
             val b0 = jpegBytes[i].toInt() and 0xFF
             val b1 = jpegBytes[i + 1].toInt() and 0xFF
-            if (b0 == 0xFF && b1 == 0xD9) {
+            if (b0 == 0xFF && b1 == 0xDA) {
                 insertAt = i
                 break
+            }
+            if (b0 == 0xFF && b1 >= 0xE0 && b1 <= 0xEF) {
+                // Skip this APP marker: FF En | size (2 bytes big-endian)
+                val segSize = ((jpegBytes[i + 2].toInt() and 0xFF) shl 8) or (jpegBytes[i + 3].toInt() and 0xFF)
+                i += 2 + segSize
+            } else if (b0 == 0xFF && b1 != 0x00 && b1 != 0xFF) {
+                // Skip other markers: FF XX | size (2 bytes big-endian)
+                val segSize = ((jpegBytes[i + 2].toInt() and 0xFF) shl 8) or (jpegBytes[i + 3].toInt() and 0xFF)
+                i += 2 + segSize
+            } else {
+                i++
             }
         }
 
@@ -307,9 +413,9 @@ private fun embedXmpMetadata(jpegPath: String, fullW: Int, fullH: Int, headingDe
             out.write(app1.toByteArray())
             out.write(jpegBytes, insertAt, jpegBytes.size - insertAt)
             jpegFile.writeBytes(out.toByteArray())
-            Log.d("PhotoSphere", "XMP metadata embedded")
+            Log.d("PhotoSphere", "XMP metadata embedded before SOS at offset $insertAt")
         } else {
-            Log.w("PhotoSphere", "Could not find JPEG EOI marker")
+            Log.w("PhotoSphere", "Could not find JPEG SOS marker")
         }
     } catch (e: Exception) {
         Log.e("PhotoSphere", "XMP embedding failed", e)
@@ -337,13 +443,17 @@ private fun processHomographyFallback(mats: List<Mat>, isPreview: Boolean): Stri
         orb.detectAndCompute(next, Mat(), kpNext, descNext)
 
         val matches = MatOfDMatch()
-        if (descPano.empty() || descNext.empty()) continue
+        if (descPano.empty() || descNext.empty()) {
+            kpPano.release(); kpNext.release(); descPano.release(); descNext.release(); matches.release()
+            continue
+        }
         matcher.match(descPano, descNext, matches)
 
         val matchList = matches.toList()
         val goodMatches = matchList.filter { it.distance < 50f }
         if (goodMatches.size < 10) {
             Log.w("PhotoSphere", "Frame $i: only ${goodMatches.size} good matches, skipping")
+            kpPano.release(); kpNext.release(); descPano.release(); descNext.release(); matches.release()
             continue
         }
 
@@ -355,7 +465,12 @@ private fun processHomographyFallback(mats: List<Mat>, isPreview: Boolean): Stri
 
         val inlierMask = Mat()
         val H = Calib3d.findHomography(srcPts, dstPts, Calib3d.RANSAC, 5.0, inlierMask)
-        if (H == null) { Log.w("PhotoSphere", "Frame $i: homography failed"); continue }
+        if (H == null) {
+            Log.w("PhotoSphere", "Frame $i: homography failed")
+            kpPano.release(); kpNext.release(); descPano.release(); descNext.release(); matches.release()
+            srcPts.release(); dstPts.release(); inlierMask.release()
+            continue
+        }
 
         val h = panorama.rows(); val w = maxPanoramaW
         val warped = Mat()
@@ -368,12 +483,14 @@ private fun processHomographyFallback(mats: List<Mat>, isPreview: Boolean): Stri
         val mask = Mat()
         Core.inRange(warped, Scalar(1.0, 1.0, 1.0), Scalar(255.0, 255.0, 255.0), mask)
         warped.copyTo(extended, mask); mask.release()
+        warped.release()
 
         panorama.release(); panorama = extended
 
         kpPano.release(); kpNext.release()
         descPano.release(); descNext.release()
         matches.release(); inlierMask.release(); H.release()
+        srcPts.release(); dstPts.release()
     }
 
     // Crop black borders
@@ -463,3 +580,70 @@ private fun processHomographyFallback(mats: List<Mat>, isPreview: Boolean): Stri
     Log.d("PhotoSphere", "Homography stitch complete: $savedPath")
     return savedPath
 }
+
+actual suspend fun computeVisualRotation(prevPath: String, currentPath: String): Float? = withContext(Dispatchers.IO) {
+    computeVisualRotationSync(prevPath, currentPath)
+}
+
+/**
+ * Synchronous version of [computeVisualRotation] — call on [Dispatchers.IO].
+ * Computes the visual rotation angle (in degrees) between two sphere images
+ * using ORB feature matching + affine transform estimation.
+ * Returns null if matching fails (too few features, motion blur, etc.).
+ */
+fun computeVisualRotationSync(prevPath: String, currentPath: String): Float? {
+    val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
+    val bmp1 = BitmapFactory.decodeFile(prevPath, opts) ?: return null
+    val bmp2 = BitmapFactory.decodeFile(currentPath, opts) ?: return null
+
+    val m1 = Mat(); Utils.bitmapToMat(bmp1, m1); bmp1.recycle()
+    val m2 = Mat(); Utils.bitmapToMat(bmp2, m2); bmp2.recycle()
+    val g1 = Mat(); Imgproc.cvtColor(m1, g1, Imgproc.COLOR_BGRA2GRAY); m1.release()
+    val g2 = Mat(); Imgproc.cvtColor(m2, g2, Imgproc.COLOR_BGRA2GRAY); m2.release()
+
+    val orb = ORB.create(1500)
+    val kp1 = MatOfKeyPoint(); val desc1 = Mat()
+    val kp2 = MatOfKeyPoint(); val desc2 = Mat()
+    orb.detectAndCompute(g1, Mat(), kp1, desc1)
+    orb.detectAndCompute(g2, Mat(), kp2, desc2)
+    g1.release(); g2.release()
+
+    if (desc1.empty() || desc2.empty()) {
+        kp1.release(); kp2.release(); desc1.release(); desc2.release()
+        return null
+    }
+
+    val matcher = DescriptorMatcher.create(DescriptorMatcher.BRUTEFORCE_HAMMING)
+    val matches = MatOfDMatch()
+    matcher.match(desc1, desc2, matches)
+
+    val matchList = matches.toList()
+    val good = matchList.filter { it.distance < 50f }
+    if (good.size < 8) {
+        kp1.release(); kp2.release(); desc1.release(); desc2.release(); matches.release()
+        return null
+    }
+
+    val srcPts = MatOfPoint2f()
+    val dstPts = MatOfPoint2f()
+    val kpList1 = kp1.toList(); val kpList2 = kp2.toList()
+    srcPts.fromArray(*good.map { kpList1[it.queryIdx].pt }.toTypedArray())
+    dstPts.fromArray(*good.map { kpList2[it.trainIdx].pt }.toTypedArray())
+
+    val inlierMask = Mat()
+    val affine = Calib3d.estimateAffine2D(srcPts, dstPts, inlierMask, Calib3d.RANSAC, 3.0)
+
+    kp1.release(); kp2.release(); desc1.release(); desc2.release(); matches.release()
+    srcPts.release(); dstPts.release(); inlierMask.release()
+
+    if (affine == null || affine.empty()) return null
+
+    val a = affine.get(0, 0)[0]; val c = affine.get(1, 0)[0]
+    val s = sqrt(a * a + c * c)
+    if (s < 0.3 || s > 3.0) { affine.release(); return null }
+
+    val rotDeg = Math.toDegrees(atan2(c / s, a / s))
+    affine.release()
+    return rotDeg.toFloat()
+}
+

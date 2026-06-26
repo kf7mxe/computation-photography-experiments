@@ -28,6 +28,7 @@ actual fun ElementWriter.cameraView(
     sphereGridData: Signal<List<List<Boolean>>>,
     sphereCurrentCell: Signal<Pair<Int, Int>?>,
     sphereGhostFrames: Signal<List<SphereGhostFrame>>,
+    sphereDriftCorrection: Signal<Float>,
     isQuadBayer: Signal<Boolean>,
     quadBayerFrameCount: Signal<Int>,
     quadBayerAlgorithm: Signal<Int>,
@@ -35,6 +36,7 @@ actual fun ElementWriter.cameraView(
     quadBayerPipeToHdr: Signal<Boolean>,
     quadBayerPipeToNightSight: Signal<Boolean>,
     quadBayerSaveDng: Signal<Boolean>,
+    quadBayerSmartSelection: Signal<Boolean>,
     onQuadBayerCaptured: ((List<String>) -> Unit)?
 ) {
     text("Camera View (iOS — coming soon)")

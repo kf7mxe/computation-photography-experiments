@@ -8,3 +8,5 @@ actual suspend fun processPhotoSphere(
     println("PhotoSphere processing not yet available on iOS")
     return null
 }
+
+actual suspend fun computeVisualRotation(prevPath: String, currentPath: String): Float? = null

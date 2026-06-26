@@ -57,6 +57,23 @@ actual suspend fun processQuadBayer(
             normalized.add(f32)
         }
 
+        // Step 2a: smart frame selection — drop blurry frames
+        if (options.smartSelection && normalized.size > 2) {
+            val scored = normalized.mapIndexed { idx, m ->
+                val lap = Mat(); Imgproc.Laplacian(m, lap, CvType.CV_32F)
+                val mean = MatOfDouble(); val stddev = MatOfDouble()
+                Core.meanStdDev(lap, mean, stddev)
+                val sharpness = stddev.toArray().firstOrNull() ?: 0.0
+                lap.release(); mean.release(); stddev.release()
+                idx to sharpness
+            }
+            val keepCount = (scored.size * 0.75).toInt().coerceAtLeast(2)
+            val keptIndices = scored.sortedByDescending { it.second }.take(keepCount).map { it.first }.toSet()
+            val toRemove = normalized.indices.filter { it !in keptIndices }.sortedDescending()
+            for (i in toRemove) { normalized[i].release(); normalized.removeAt(i) }
+            Log.d("QuadBayer", "Smart selection: ${scored.size} -> ${normalized.size} frames")
+        }
+
         // Step 2: merge multiple frames (average)
         val merged: Mat
         if (normalized.size > 1) {

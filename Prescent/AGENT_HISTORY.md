@@ -744,3 +744,100 @@ Renamed `currentPitch` → `currentElevation` to reflect the corrected meaning.
 - `apps/src/jsMain/kotlin/.../views/HdrProcessor.js.kt` — Updated actual signature with 6 new params (stub returns null).
 
 - `apps/src/commonMain/kotlin/.../views/HdrProcessingPage.kt` — Added "Pyramid Fusion" (11th algorithm) to algorithm list and randomize pool. Added `pyramidNoiseStrength` Signal + slider for noise-aware fusion control. Added Enhancements card with 6 toggle buttons: Smart Frame Selection, Hot Pixel Fix, CA Correction, Lens Correction, Smart NR, Contrast Sharpening. All new signals tracked in reactive preview trigger and passed to `processHdr()` call. Randomize function now randomizes all new flags. Updated algorithm count references.
+
+### 2026-06-25 18:57
+
+**Algorithm Logic Bug Fixes (Continued from previous session)**
+
+* `apps/src/androidMain/kotlin/com/kf7mxe/prescent/views/HdrAlgorithms.android.kt`
+  - **CRITICAL ALGORITHM BUG:** `laplacianPyramidFusion` ghost-rejection weight was inverted. Previously `weight = normalize(diff)` → `max(weight, 1/(f+1))`, meaning ghost regions (high diff) got a *higher* blend weight. Fixed: `ghostWeight = normalize(diff)`, then `blendWeight = (1 - ghostWeight) * blendFactor`, so ghost pixels (high diff) now correctly receive near-zero weight.
+  - **CORRUPTION BUG:** `currentLap = pyramids[f].laplace[level]` was a direct reference into the pyramid's stored list, then it was mutated (`Core.multiply` in-place) and `released()`. On the next iteration or level, the same pyramid entry was now corrupted/freed native memory. Fixed: `currentLap = pyramids[f].laplace[level].clone()` — operate on an independent copy; do not release `currentGauss`/`refGauss` (they are still pyramid members).
+  - **MEMORY LEAK:** `transDark` Mat allocated at line 329 but never released in `darkChannelPriorDehaze`. Added `transDark.release()` alongside `flatDark.release()`.
+  - **MEMORY LEAK + DIM MISMATCH:** In `multiFrameSuperResolution`, `Core.divide(accumulator, weightMap, result)` divided a CV_32FC3 Mat by a CV_32F Mat — OpenCV requires same channel count. Fixed by merging `weightMap` into a 3-channel `weightMap3ch` before dividing. Also removed the dead `val sharpened = Mat()` allocation (the variable was never used; `Core.merge` was writing into `result`).
+
+* `apps/src/androidMain/kotlin/com/kf7mxe/prescent/views/FocusStackProcessor.android.kt`
+  - **USE-AFTER-FREE:** `exposureBalanceFrames` was calling `m.release()` on each frame inside the function, but `frameMats` (the caller's list) still held those references. The caller's cleanup loop at line 109 then called `release()` a second time on already-freed native memory. Removed the premature `m.release()` from `exposureBalanceFrames` — the caller owns the lifecycle.
+  - **MEMORY LEAK:** `hdrHybridFocusStack` built `hdrFrames` (intermediate HDR-fused Mats per focus position) but never released them after `multiScalePyramidStack` returned. Added `hdrFrames.forEach { it.release() }` before returning.
+
+* `apps/src/androidMain/kotlin/com/kf7mxe/prescent/views/NightSightProcessor.android.kt`
+  - **DOUBLE-RELEASE:** When `useLuckyPreFilter == false`, `workingFrames === subtracted` (same object reference). The cleanup code was releasing both `subtracted` (line 91) and then iterating `workingFrames` (line 92), double-freeing every Mat. Fixed by guarding `workingFrames.forEach { it.release() }` with `if (workingFrames !== subtracted)`.
+
+### 2026-06-25 19:00
+
+**Session goal:** Fix OOM crashes from Mat memory leaks in HDR and Focus Stack processors.
+
+**Root cause — HdrProcessor:** The `_track` + `releaseAll()` mechanism was defined but `releaseAll()` was **never called** in the `finally` block. When an exception or `OutOfMemoryError` occurred mid-pipeline, all tracked Mats (aligned, cropped, denoised, preprocessed, post-processing intermediates) leaked native memory silently. Additionally, the original `mats` list (decoded bitmaps) was held until `finally` — meaning during alignment we held `mats` (432MB for 3×48MP) + `alignedMats` (432MB) simultaneously: ~864MB peak.
+
+**Root cause — FocusStackProcessor:** No try/catch/finally existed at all. Any exception during processing leaked every Mat allocated throughout the pipeline (frameMats, balancedMats, alignedFrames, result8).
+
+**Files changed:**
+
+- `apps/src/androidMain/kotlin/.../views/HdrProcessor.android.kt`
+  - **OOM fix — missing `releaseAll()`:** Added `releaseAll()` call to the `finally` block. All tracked pipeline Mats are now guaranteed released on any exit path including OOM.
+  - **Peak memory reduction:** Released and cleared `mats` list immediately after alignment instead of waiting for `finally`. Frees ~432MB of original image memory before algorithm processing begins.
+  - **Comprehensive tracking:** Added `trackedMat()` convenience. `resultMat`, `ghostFree`, `post8`, and all post-processing `next` values now tracked via `track(...)`. Ensures any intermediate is released even if exception happens mid-post-processing.
+  - **OOM catch:** Added separate `catch (e: OutOfMemoryError)` block that logs and returns null (previously OOM propagated as uncatchable Error, crashing the app).
+
+- `apps/src/androidMain/kotlin/.../views/FocusStackProcessor.android.kt`
+  - **Full try/catch/finally wrapper:** Entire processing body wrapped in `try/catch/finally` with Mat tracking.
+  - **Mat tracking:** Added `_track` + `releaseTracked()` mechanism (same pattern as HdrProcessor). Declared `result8`, `resultBitmap`, `balancedMats`, `alignedFrames` as nullable `var`s outside the `try` block so `finally` can access them.
+  - **Catch both OOM and Exception:** Separate `OutOfMemoryError` catch block prevents app crash.
+  - **Intermediate release:** Releases all intermediates in `finally`; also releases early in normal path before file I/O to reduce peak memory.
+
+### 2026-06-25 19:30
+
+**Session goal:** Persist enhancement toggles via PersistentProperty; add smart frame selection for Quad Bayer RAW pipeline.
+
+**Files changed:**
+
+- `apps/src/commonMain/kotlin/.../settings.kt` — Added 8 new `PersistentProperty` instances for enhancement toggles: `smartFrameSelectionStore`, `hotPixelFixStore`, `caCorrectionStore`, `lensCorrectionStore`, `smartNRStore`, `contrastSharpeningStore`, `jointDenoiseStore`, `dehazeStore`. Each defaulting to `"false"`.
+
+- `apps/src/commonMain/kotlin/.../views/HdrProcessingPage.kt` — **Load:** Enhanced `load {}` block to restore all 8 enhancement toggles from their PersistentProperties. **Save:** Added a `reactive {}` block that watches all 8 enhancement signals and persists them on every change. **Imports:** Added 8 store imports. Enhancement toggle state now survives app restarts.
+
+- `apps/src/commonMain/kotlin/.../views/QuadBayerProcessor.kt` — Added `smartSelection: Boolean = false` to `QuadBayerOptions` data class.
+
+- `apps/src/androidMain/kotlin/.../views/QuadBayerProcessor.android.kt` — Added smart frame selection before multi-frame averaging: computes Laplacian variance per normalized float Bayer frame, sorts by sharpness, keeps top 75% (minimum 2), releases dropped frames. Reduces ghosting from motion-blurred RAW frames.
+
+- `apps/src/commonMain/kotlin/.../views/CameraView.kt` — Added `quadBayerSmartSelection: Signal<Boolean>` to expect declaration.
+
+- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — Added `quadBayerSmartSelection` to actual signature. Passes `smartSelection = quadBayerSmartSelection.value` in both `QuadBayerOptions` creation sites.
+
+- `apps/src/commonMain/kotlin/.../views/CameraPage.kt` — Added `quadBayerSmartSelection = Signal(false)`. Added "Smart Select" toggle button in Quad Bayer overlay. Passes signal to `cameraView()` call.
+
+- `apps/src/iosMain/kotlin/.../views/CameraView.ios.kt` — Added `quadBayerSmartSelection: Signal<Boolean>` to stub signature.
+
+- `apps/src/jsMain/kotlin/.../views/CameraView.js.kt` — Added `quadBayerSmartSelection: Signal<Boolean>` to stub signature.
+
+### 2026-06-25 20:00
+
+**Session goal:** Fix no initial preview on HDR processing page.
+
+**Root cause:** Two concurrent paths called `processHdrInternal(false)` — one from `load {}` (added this session) and one from the `reactive {}` preview-trigger block. Both ran simultaneously with 600ms delays, racing on OpenCV native memory (Mat objects, file I/O). This race caused intermittent null results and the "adjust settings to preview" placeholder. The `reactive {}` block also only fires when dependency signals *change*, not on initial mount — so with all enhancements at their default `false`, no signal change occurred, and the reactive block's initial run's launched coroutine was the only one. But it still should have worked... unless the reactive block doesn't fire on mount at all.
+
+**Files changed:**
+
+- `apps/src/commonMain/kotlin/.../views/HdrProcessingPage.kt`
+  - **Removed `processHdrInternal(false)` from `load {}`** — `load {}` now only restores persisted settings then sets a `mountTrigger` signal. No longer directly calls processing, eliminating the race with the `reactive {}` block.
+  - **Added `mountTrigger = Signal(0)`** — `load {}` sets `mountTrigger.value = 1` after restoring settings. The `reactive {}` preview trigger depends on `mountTrigger()`, so it fires reliably on mount even when no other signal values change from defaults.
+  - **Added `previewGuard`** — boolean flag that blocks concurrent preview execution. Set to `true` when a preview starts, reset to `false` in `finally`. This ensures only one preview runs at a time, even if the reactive block fires multiple times rapidly.
+  - **Moved mount trigger dependency** — `mountTrigger()` added to the signal-read list in the preview trigger `reactive {}` block.
+
+### 2026-06-25 21:00
+
+**Session goal:** Complete photosphere ghost drift correction — wire `computeVisualRotation()` call in sphere capture flow and apply drift correction in GhostOverlayView.
+
+**Files changed:**
+
+- `apps/src/commonMain/kotlin/.../views/CameraPage.kt` — **Wired drift correction in sphere capture flow:** `onImagesCaptured` now launches a `GlobalScope.launch` coroutine that calls `computeVisualRotation(prevPath, currentPath)` when a new sphere frame arrives and a previous frame exists. Drift delta = visual rotation - gyro delta. `accumulatedDrift` updated and `sphereDriftCorrection` signal set. `SphereGhostFrame.driftAtCapture` stores accumulated drift at capture time. Raw gyro azimuth stored (not corrected) — correction applied at render time. First frame skips visual rotation (no previous path). `prevSpherePath` and `prevSphereAz` updated after each capture to chain the next computation. Reset state on sphere mode exit now clears `accumulatedDrift`, `sphereDriftCorrection`, `prevSpherePath`, and `prevSphereAz`.
+
+- `apps/src/androidMain/kotlin/.../views/CameraView.android.kt` — **Passed `sphereDriftCorrection` to GhostOverlayView.** Both `ghostOverlay.update()` call sites (sensor listener `onSensorChanged` + reactive ghost sync block) now pass the current drift value. GhostOverlayView's `update()` signature extended with `drift: Float = 0f` parameter. Added `currentDrift` field. `onDraw()` now computes drift-corrected azimuth delta: `dAz = (frame.azimuth + frame.driftAtCapture) - (currentAzimuth + currentDrift)` — compensates both the capture-time drift and the current drift, so ghosts stay at their true world position as drift accumulates.
+
+- `apps/src/commonMain/kotlin/.../views/CameraView.kt` — Added `sphereDriftCorrection: Signal<Float> = Signal(0f)` to expect declaration (was missing from previous session).
+
+- `apps/src/iosMain/kotlin/.../views/CameraView.ios.kt` — Added `sphereDriftCorrection: Signal<Float>` to stub actual.
+
+- `apps/src/jsMain/kotlin/.../views/CameraView.js.kt` — Added `sphereDriftCorrection: Signal<Float>` to stub actual.
+
+- `apps/src/commonMain/kotlin/.../views/CameraPage.kt` — Added `sphereDriftCorrection = sphereDriftCorrection` pass-through in `cameraView()` call (was missing from previous session).
+
+- `apps/src/androidMain/kotlin/.../views/PhotoSphereProcessor.android.kt` — Removed duplicate `computeVisualRotation()` function (non-suspend copy at end of file was identical to `computeVisualRotationSync` and would shadow the actual suspend function).

@@ -15,10 +15,10 @@ import com.lightningkite.reactive.context.invoke
 import com.lightningkite.reactive.core.Signal
 import com.lightningkite.reactive.context.reactive
 import com.lightningkite.reactive.extensions.equalTo
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
 import kotlin.math.abs
 
-data class SphereGhostFrame(val azimuth: Float, val pitch: Float, val path: String)
+data class SphereGhostFrame(val azimuth: Float, val pitch: Float, val path: String, val driftAtCapture: Float = 0f)
 
 class CameraPage : Page, FullscreenPage {
 
@@ -47,6 +47,10 @@ class CameraPage : Page, FullscreenPage {
     val sphereGhostFrames = Signal<List<SphereGhostFrame>>(emptyList())
     private val pendingSphereCaptures = mutableListOf<PendingSphereCapture>()
     val sphereCurrentCell = Signal<Pair<Int, Int>?>(null)
+    private var prevSpherePath: String? = null
+    private var prevSphereAz: Float = 0f
+    var accumulatedDrift: Float = 0f
+    val sphereDriftCorrection = Signal(0f)
 
     val isQuadBayer = Signal(false)
     val quadBayerFrameCount = Signal(3)
@@ -55,6 +59,7 @@ class CameraPage : Page, FullscreenPage {
     val quadBayerPipeToHdr = Signal(false)
     val quadBayerPipeToNightSight = Signal(false)
     val quadBayerSaveDng = Signal(false)
+    val quadBayerSmartSelection = Signal(false)
     private val quadBayerAlgorithmOptions = Signal(listOf(
         0 to "Bin-to-Bayer",
         1 to "Full Remosaic",
@@ -168,6 +173,10 @@ class CameraPage : Page, FullscreenPage {
                     sphereGhostFrames.value = emptyList()
                     pendingSphereCaptures.clear()
                     sphereCurrentCell.value = null
+                    accumulatedDrift = 0f
+                    sphereDriftCorrection.value = 0f
+                    prevSpherePath = null
+                    prevSphereAz = 0f
                 }
             }
 
@@ -185,9 +194,27 @@ class CameraPage : Page, FullscreenPage {
                             isHdrMode.value && paths.size > 1 -> GlobalNavigator.main.navigate(HdrProcessingPage(paths))
                             captureMode.value == "sphere" && paths.isNotEmpty() -> {
                                 sphereFrames.value = sphereFrames.value + paths
+                                val currentPath = paths.first()
                                 val pending = pendingSphereCaptures.removeFirstOrNull()
                                 if (pending != null) {
-                                    sphereGhostFrames.value = sphereGhostFrames.value + SphereGhostFrame(pending.azimuth, pending.pitch, paths.first())
+                                    if (prevSpherePath != null) {
+                                        GlobalScope.launch {
+                                            val visualRot = computeVisualRotation(prevSpherePath!!, currentPath)
+                                            withContext(Dispatchers.Main) {
+                                                if (visualRot != null) {
+                                                    val gyroDelta = pending.azimuth - prevSphereAz
+                                                    val driftDelta = visualRot - gyroDelta
+                                                    accumulatedDrift += driftDelta
+                                                    sphereDriftCorrection.value = accumulatedDrift
+                                                }
+                                                sphereGhostFrames.value = sphereGhostFrames.value + SphereGhostFrame(pending.azimuth, pending.pitch, currentPath, accumulatedDrift)
+                                            }
+                                        }
+                                    } else {
+                                        sphereGhostFrames.value = sphereGhostFrames.value + SphereGhostFrame(pending.azimuth, pending.pitch, currentPath, 0f)
+                                    }
+                                    prevSpherePath = currentPath
+                                    prevSphereAz = pending.azimuth
                                 }
                             }
                         }
@@ -230,6 +257,7 @@ class CameraPage : Page, FullscreenPage {
                     sphereGridData = sphereGrid,
                     sphereCurrentCell = sphereCurrentCell,
                     sphereGhostFrames = sphereGhostFrames,
+                    sphereDriftCorrection = sphereDriftCorrection,
                     isQuadBayer = isQuadBayer,
                     quadBayerFrameCount = quadBayerFrameCount,
                     quadBayerAlgorithm = quadBayerAlgorithm,
@@ -237,6 +265,7 @@ class CameraPage : Page, FullscreenPage {
                     quadBayerPipeToHdr = quadBayerPipeToHdr,
                     quadBayerPipeToNightSight = quadBayerPipeToNightSight,
                     quadBayerSaveDng = quadBayerSaveDng,
+                    quadBayerSmartSelection = quadBayerSmartSelection,
                     onQuadBayerCaptured = { paths ->
                         println("CameraPage: onQuadBayerCaptured with ${paths.size} paths: $paths")
                         if (paths.isNotEmpty()) {
@@ -357,6 +386,10 @@ class CameraPage : Page, FullscreenPage {
                             toggleButton {
                                 text("Save DNG")
                                 checked bind quadBayerSaveDng
+                            }
+                            toggleButton {
+                                text("Smart Select")
+                                checked bind quadBayerSmartSelection
                             }
                         }
                         reactive {

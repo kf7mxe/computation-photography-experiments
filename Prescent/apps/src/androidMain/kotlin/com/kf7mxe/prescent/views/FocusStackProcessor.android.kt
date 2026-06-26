@@ -58,74 +58,101 @@ actual suspend fun processFocusStack(
 
     // Decode
     val frameMats = mutableListOf<Mat>()
-    for (path in images) {
-        val opts = BitmapFactory.Options()
-        if (isPreview) {
-            opts.inJustDecodeBounds = true
-            BitmapFactory.decodeFile(path, opts)
-            val w = opts.outWidth; val h = opts.outHeight
-            var s = 1; while (w / s > maxPreviewSize || h / s > maxPreviewSize) s *= 2
-            opts.inSampleSize = s; opts.inJustDecodeBounds = false
-        }
-        val bmp = BitmapFactory.decodeFile(path, opts) ?: continue
-        val rgba = Mat()
-        Utils.bitmapToMat(bmp, rgba); bmp.recycle()
-        val rgb = Mat()
-        Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB)
-        rgba.release()
-        frameMats.add(rgb)
+    val _track = mutableListOf<Mat>()
+    fun t(m: Mat): Mat { _track.add(m); return m }
+    fun releaseTracked() {
+        val seen = mutableSetOf<Mat>()
+        for (m in _track) { if (m !in seen) { try { m.release() } catch (_: Exception) {}; seen.add(m) } }
+        _track.clear()
     }
-    if (frameMats.size < 2) return@withContext null
+    var result8: Mat? = null
+    var resultBitmap: Bitmap? = null
+    var alignedFrames: List<Mat>? = null
+    var balancedMats: List<Mat>? = null
 
-    // Exposure balance (pre-alignment)
-    val balancedMats = if (exposureBalance) {
-        exposureBalanceFrames(frameMats)
-    } else frameMats
+    try {
+        for (path in images) {
+            val opts = BitmapFactory.Options()
+            if (isPreview) {
+                opts.inJustDecodeBounds = true
+                BitmapFactory.decodeFile(path, opts)
+                val w = opts.outWidth; val h = opts.outHeight
+                var s = 1; while (w / s > maxPreviewSize || h / s > maxPreviewSize) s *= 2
+                opts.inSampleSize = s; opts.inJustDecodeBounds = false
+            }
+            val bmp = BitmapFactory.decodeFile(path, opts) ?: continue
+            val rgba = Mat()
+            Utils.bitmapToMat(bmp, rgba); bmp.recycle()
+            val rgb = Mat()
+            Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB)
+            rgba.release()
+            frameMats.add(rgb)
+        }
+        if (frameMats.size < 2) return@withContext null
 
-    // Alignment
-    val alignedFrames = alignFocusFrames(balancedMats, alignmentMethod)
+        // Exposure balance (pre-alignment)
+        balancedMats = if (exposureBalance) {
+            exposureBalanceFrames(frameMats)
+        } else frameMats
 
-    // Parse refocusDepth for interactive refocus
-    val depthFraction = refocusDepth.toDouble().coerceIn(0.0, 1.0)
+        // Alignment
+        alignedFrames = alignFocusFrames(balancedMats, alignmentMethod)
 
-    val result8 = when (algorithm) {
-        "Depth Map" -> generateDepthMap(alignedFrames, showDepthMap)
-        "Interactive Refocus" -> interactiveRefocus(alignedFrames, depthFraction)
-        "Exposure Balanced" -> standardFocusStack(alignedFrames, pyramidLevels, gaussianBlurWeightMaps = true)
-        "Feature Align", "Feature" -> standardFocusStack(alignedFrames, pyramidLevels, gaussianBlurWeightMaps = true)
-        "HDR Hybrid" -> if (hdrHybridFramesPerFocus > 1) {
-            hdrHybridFocusStack(alignedFrames, hdrHybridFramesPerFocus)
+        // Parse refocusDepth for interactive refocus
+        val depthFraction = refocusDepth.toDouble().coerceIn(0.0, 1.0)
+
+        result8 = when (algorithm) {
+            "Depth Map" -> generateDepthMap(alignedFrames, showDepthMap)
+            "Interactive Refocus" -> interactiveRefocus(alignedFrames, depthFraction)
+            "Exposure Balanced" -> standardFocusStack(alignedFrames, pyramidLevels, gaussianBlurWeightMaps = true)
+            "Feature Align", "Feature" -> standardFocusStack(alignedFrames, pyramidLevels, gaussianBlurWeightMaps = true)
+            "HDR Hybrid" -> if (hdrHybridFramesPerFocus > 1) {
+                hdrHybridFocusStack(alignedFrames, hdrHybridFramesPerFocus)
+            } else {
+                Log.w(TAG, "HDR hybrid needs hdrHybridFramesPerFocus > 1, using standard stack")
+                standardFocusStack(alignedFrames, pyramidLevels, gaussianBlurWeightMaps = true)
+            }
+            else -> multiScalePyramidStack(alignedFrames, pyramidLevels)
+        }
+
+        resultBitmap = Bitmap.createBitmap(result8.cols(), result8.rows(), Bitmap.Config.ARGB_8888)
+        Utils.matToBitmap(result8, resultBitmap)
+        result8.release(); result8 = null
+
+        // Release intermediate Mats early (before save)
+        frameMats.forEach { it.release() }; frameMats.clear()
+        balancedMats?.forEach { bm ->
+            if (balancedMats !== frameMats) bm.release()
+        }; balancedMats = null
+        alignedFrames?.forEach { it.release() }; alignedFrames = null
+
+        val filename = "focusstack_${System.currentTimeMillis()}.jpg"
+        val savedPath = if (isPreview) {
+            val f = File(context.cacheDir, filename)
+            FileOutputStream(f).use { resultBitmap.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+            resultBitmap.recycle(); resultBitmap = null
+            f.absolutePath
         } else {
-            Log.w(TAG, "HDR hybrid needs hdrHybridFramesPerFocus > 1, using standard stack")
-            standardFocusStack(alignedFrames, pyramidLevels, gaussianBlurWeightMaps = true)
+            saveToGallery(context, resultBitmap, "focusstack")
+            resultBitmap.recycle(); resultBitmap = null
+            "$filename"
         }
-        else -> multiScalePyramidStack(alignedFrames, pyramidLevels)
+        Log.d(TAG, "Complete: $savedPath")
+        savedPath
+    } catch (e: OutOfMemoryError) {
+        Log.e(TAG, "Focus stack OOM", e); null
+    } catch (e: Exception) {
+        Log.e(TAG, "Focus stack failed", e); null
+    } finally {
+        releaseTracked()
+        result8?.release()
+        resultBitmap?.recycle()
+        frameMats.forEach { it.release() }; frameMats.clear()
+        // balancedMats may share references with frameMats — skip if same list
+        if (balancedMats != null && balancedMats !== frameMats) balancedMats.forEach { it.release() }
+        alignedFrames?.forEach { it.release() }
+        System.gc()
     }
-
-    val bitmap = Bitmap.createBitmap(result8.cols(), result8.rows(), Bitmap.Config.ARGB_8888)
-    Utils.matToBitmap(result8, bitmap)
-    result8.release()
-
-    frameMats.forEach { it.release() }
-    // Balanced mats may share references with originals; only release unique ones
-    balancedMats.forEach { bm ->
-        if (frameMats.none { it === bm }) bm.release()
-    }
-    alignedFrames.forEach { it.release() }
-
-    val filename = "focusstack_${System.currentTimeMillis()}.jpg"
-    val savedPath = if (isPreview) {
-        val f = File(context.cacheDir, filename)
-        FileOutputStream(f).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 85, it) }
-        bitmap.recycle()
-        f.absolutePath
-    } else {
-        saveToGallery(context, bitmap, "focusstack")
-        bitmap.recycle()
-        "$filename"
-    }
-    Log.d(TAG, "Complete: $savedPath")
-    savedPath
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -346,7 +373,8 @@ private fun exposureBalanceFrames(frames: MutableList<Mat>): MutableList<Mat> {
         Core.multiply(f, Scalar(scale, scale, scale), f)
         Core.max(f, Scalar(0.0), f); Core.min(f, Scalar(1.0), f)
         val out = Mat(); f.convertTo(out, CvType.CV_8UC3, 255.0)
-        f.release(); m.release()
+        f.release()
+        // Do NOT release m here — it is still owned by the caller's frameMats list.
         result.add(out)
     }
     return result
@@ -445,7 +473,9 @@ private fun hdrHybridFocusStack(frames: List<Mat>, framesPerFocus: Int): Mat {
         hdrFrames.add(merged8)
     }
     Log.d(TAG, "HDR hybrid: ${hdrFrames.size} HDR frames to stack")
-    return multiScalePyramidStack(hdrFrames, 4)
+    val stacked = multiScalePyramidStack(hdrFrames, 4)
+    hdrFrames.forEach { it.release() }
+    return stacked
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -28,6 +28,7 @@ expect fun ElementWriter.cameraView(
     sphereGridData: Signal<List<List<Boolean>>> = Signal(emptyList()),
     sphereCurrentCell: Signal<Pair<Int, Int>?> = Signal(null),
     sphereGhostFrames: Signal<List<SphereGhostFrame>> = Signal(emptyList()),
+    sphereDriftCorrection: Signal<Float> = Signal(0f),
     isQuadBayer: Signal<Boolean> = Signal(false),
     quadBayerFrameCount: Signal<Int> = Signal(3),
     quadBayerAlgorithm: Signal<Int> = Signal(1),
@@ -35,5 +36,6 @@ expect fun ElementWriter.cameraView(
     quadBayerPipeToHdr: Signal<Boolean> = Signal(false),
     quadBayerPipeToNightSight: Signal<Boolean> = Signal(false),
     quadBayerSaveDng: Signal<Boolean> = Signal(false),
+    quadBayerSmartSelection: Signal<Boolean> = Signal(false),
     onQuadBayerCaptured: ((List<String>) -> Unit)? = null
 )

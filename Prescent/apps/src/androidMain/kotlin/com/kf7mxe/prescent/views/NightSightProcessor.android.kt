@@ -89,7 +89,11 @@ actual suspend fun processNightSight(
         frames.forEach { it.release() }
         aligned.forEach { it.release() }
         subtracted.forEach { it.release() }
-        workingFrames.forEach { if (it !== stacked && it !== brightened && it !== enhanced) it.release() }
+        // workingFrames is either the same list as subtracted (lucky filter off) or
+        // a new list of clones (lucky filter on). Only release if it's a distinct list.
+        if (workingFrames !== subtracted) {
+            workingFrames.forEach { it.release() }
+        }
         stacked.release()
         brightened.release()
         enhanced.release()

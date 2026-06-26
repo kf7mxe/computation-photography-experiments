@@ -98,6 +98,25 @@ actual suspend fun processHdr(
 
     Log.d("HdrProcessor", "Starting HDR ($algorithm) with ${images.size} images, surreal=$surrealAmount, preview=$isPreview")
 
+    // Track all pipeline-created Mats for guaranteed cleanup
+    val _track = mutableListOf<Mat>()
+    fun track(m: Mat): Mat { _track.add(m); return m }
+    fun trackAll(ms: List<Mat>) { _track.addAll(ms) }
+    fun releaseAll() {
+        val seen = mutableSetOf<Mat>()
+        for (m in _track) { if (m !in seen) { try { m.release() } catch (_: Exception) {}; seen.add(m) } }
+        _track.clear()
+    }
+    // Convenience: track Mat() constructor results inline
+    fun trackedMat(): Mat = track(Mat())
+
+    var resultMat: Mat? = null
+    var ghostFree: Mat? = null
+    var post8: Mat? = null
+    var hdrMat_debevec: Mat? = null
+    var rgb32f_debevec: Mat? = null
+    var response_debevec: Mat? = null
+
     try {
         for (imageUriString in images) {
             val options = BitmapFactory.Options()
@@ -120,19 +139,36 @@ actual suspend fun processHdr(
             rgbaMat.release()
             mats.add(rgbMat)
         }
+        System.gc()
 
-        if (mats.size < 2) return@withContext null
+        if (mats.size < 2) {
+            mats.forEach { it.release() }
+            return@withContext null
+        }
 
         // Smart frame selection: drop blurry frames
         val filteredMats = if (smartFrameSelection && mats.size > 2) {
-            selectSharpestFrames(mats, 0.75)
+            val kept = selectSharpestFrames(mats, 0.75)
+            for (m in mats) {
+                if (m !in kept) {
+                    m.release()
+                }
+            }
+            kept
         } else mats
         Log.d("HdrProcessor", "Smart selection: ${mats.size} → ${filteredMats.size} frames")
 
         // Joint denoise: use well-exposed frame as guide to denoise underexposed
         val denoisedMats = if (enableJointDenoise) {
             Log.d("HdrProcessor", "Applying joint denoise")
-            jointDenoiseBracketPair(filteredMats)
+            val results = jointDenoiseBracketPair(filteredMats)
+            for (i in filteredMats.indices) {
+                if (filteredMats[i] !== results[i]) {
+                    filteredMats[i].release()
+                }
+            }
+            trackAll(results)
+            results
         } else filteredMats
 
         // Per-frame pre-processing (hot pixel, CA, lens distortion)
@@ -140,24 +176,58 @@ actual suspend fun processHdr(
             var m = mat
             if (enableHotPixelFix) {
                 Log.d("HdrProcessor", "Applying hot pixel fix")
-                m = detectAndFixHotPixels(m)
+                val next = detectAndFixHotPixels(m)
+                if (m !== mat) m.release()
+                m = next
             }
             if (enableCACorrection) {
                 Log.d("HdrProcessor", "Applying chromatic aberration correction")
-                m = correctChromaticAberration(m)
+                val next = correctChromaticAberration(m)
+                if (m !== mat) m.release()
+                m = next
             }
             if (enableLensCorrection) {
                 Log.d("HdrProcessor", "Applying lens distortion correction")
-                m = correctLensDistortion(m)
+                val next = correctLensDistortion(m)
+                if (m !== mat) m.release()
+                m = next
             }
             m
         }
+        for (i in denoisedMats.indices) {
+            if (denoisedMats[i] !== preprocessed[i]) {
+                denoisedMats[i].release()
+                track(preprocessed[i])
+            }
+        }
 
         val alignedMats = alignImages(preprocessed, alignment)
-        val croppedMats = if (cropAfterAlignment) cropValidRegion(alignedMats) else alignedMats
-        if (croppedMats.size < 2) return@withContext null
+        for (i in preprocessed.indices) {
+            if (preprocessed[i] !== alignedMats[i]) {
+                preprocessed[i].release()
+            }
+        }
+        trackAll(alignedMats)
+        // After alignment, original mats are fully superseded — release early
+        for (i in mats.indices) { try { mats[i].release() } catch (_: Exception) {} }
+        mats.clear()
+        System.gc()
 
-        val resultMat = Mat()
+        val croppedMats = if (cropAfterAlignment) cropValidRegion(alignedMats) else alignedMats
+        trackAll(croppedMats)
+        if (cropAfterAlignment) {
+            for (i in alignedMats.indices) {
+                if (alignedMats[i] !== croppedMats[i]) {
+                    alignedMats[i].release()
+                }
+            }
+        }
+        if (croppedMats.size < 2) {
+            croppedMats.forEach { it.release() }
+            return@withContext null
+        }
+
+        resultMat = trackedMat()
         when (algorithm) {
             "Hybrid" -> {
                 hybridToneMap(croppedMats, resultMat, surrealAmount,
@@ -182,10 +252,23 @@ actual suspend fun processHdr(
                 merger.process(croppedMats, resultMat)
             }
             "Pyramid Fusion" -> {
-                val cfg = PyramidMergeConfig(noiseStrength = pyramidNoiseStrength.toDouble())
-                val pyramidResult = laplacianPyramidFusion(croppedMats, cfg)
-                pyramidResult.convertTo(resultMat, CvType.CV_32FC3, 1.0 / 255.0)
-                pyramidResult.release()
+                try {
+                    val cfg = PyramidMergeConfig(noiseStrength = pyramidNoiseStrength.toDouble())
+                    val pyramidResult = laplacianPyramidFusion(croppedMats, cfg)
+                    if (pyramidResult.empty()) {
+                        Log.e("HdrProcessor", "laplacianPyramidFusion returned empty Mat!")
+                        // Fall back to Mertens
+                        val merger = Photo.createMergeMertens(contrastWeight, saturationWeight, exposureWeight)
+                        merger.process(croppedMats, resultMat)
+                    } else {
+                        pyramidResult.convertTo(resultMat, CvType.CV_32FC3, 1.0 / 255.0)
+                        pyramidResult.release()
+                    }
+                } catch (e: Exception) {
+                    Log.e("HdrProcessor", "Pyramid Fusion failed, falling back to Mertens", e)
+                    val merger = Photo.createMergeMertens(contrastWeight, saturationWeight, exposureWeight)
+                    merger.process(croppedMats, resultMat)
+                }
             }
             "Guided Fusion" -> {
                 val cfg = GuidedFusionConfig(
@@ -228,82 +311,93 @@ actual suspend fun processHdr(
                 }
                 times.fromArray(*timeValues)
                 val calibrate = Photo.createCalibrateDebevec()
-                val response = Mat()
-                calibrate.process(croppedMats, response, times)
+                response_debevec = Mat()
+                calibrate.process(croppedMats, response_debevec, times)
                 val merge = Photo.createMergeDebevec()
-                val hdrMat = Mat()
-                merge.process(croppedMats, hdrMat, times, response)
-                response.release()
-                val rgb32f = Mat()
-                hdrMat.convertTo(rgb32f, CvType.CV_32F)
+                hdrMat_debevec = Mat()
+                merge.process(croppedMats, hdrMat_debevec, times, response_debevec)
+                rgb32f_debevec = Mat()
+                hdrMat_debevec.convertTo(rgb32f_debevec, CvType.CV_32F)
                 when (algorithm) {
                     "Reinhard" -> {
                         val tonemap = Photo.createTonemapReinhard().apply {
                             setGamma(gamma); setIntensity(intensity)
                             setLightAdaptation(lightAdaptation); setColorAdaptation(colorAdaptation)
                         }
-                        tonemap.process(hdrMat, resultMat)
+                        tonemap.process(hdrMat_debevec, resultMat)
                     }
                     "Drago" -> {
                         val tonemap = Photo.createTonemapDrago().apply {
                             setGamma(gamma); setSaturation(saturationWeight); setBias(dragoBias)
                         }
-                        tonemap.process(hdrMat, resultMat)
+                        tonemap.process(hdrMat_debevec, resultMat)
                     }
                     "Mantiuk" -> {
                         val tonemap = Photo.createTonemapMantiuk().apply {
                             setGamma(gamma); setSaturation(saturationWeight); setScale(mantiukScale)
                         }
-                        tonemap.process(hdrMat, resultMat)
+                        tonemap.process(hdrMat_debevec, resultMat)
                     }
                     "Fattal" -> {
-                        fattalToneMap(rgb32f, resultMat, fattalAlpha, fattalBeta, fattalColorSaturation)
+                        fattalToneMap(rgb32f_debevec!!, resultMat, fattalAlpha, fattalBeta, fattalColorSaturation)
                     }
                     "iCam06" -> {
-                        icam06ToneMap(rgb32f, resultMat, icam06ChromaticAdaptation, icam06LocalAdaptation, saturationWeight)
+                        icam06ToneMap(rgb32f_debevec!!, resultMat, icam06ChromaticAdaptation, icam06LocalAdaptation, saturationWeight)
                     }
                 }
-                rgb32f.release()
-                hdrMat.release(); times.release()
+                rgb32f_debevec?.release(); rgb32f_debevec = null
+                hdrMat_debevec?.release(); hdrMat_debevec = null
+                response_debevec?.release(); response_debevec = null
+                times.release()
             }
             else -> {
                 val merger = Photo.createMergeMertens(contrastWeight, saturationWeight, exposureWeight)
                 merger.process(croppedMats, resultMat)
             }
         }
-        if (resultMat.empty()) return@withContext null
+        croppedMats.forEach { it.release() }
+        if (resultMat.empty()) {
+            resultMat.release()
+            return@withContext null
+        }
 
         // Ghost reduction: post-process on tonemapped float output (doesn't corrupt exposure brackets)
-        val ghostFree = if (ghostingStrength > 0.01f) {
-            val reduced = Mat()
+        ghostFree = if (ghostingStrength > 0.01f) {
+            val reduced = track(Mat())
             reduceGhostArtifacts(resultMat, reduced, ghostingStrength)
-            resultMat.release()
+            resultMat?.release(); resultMat = null
             reduced
         } else resultMat
 
         // Post-processing on uint8 (smart NR, contrast sharpening, dehaze, artistic)
-        var post8 = Mat()
-        ghostFree.convertTo(post8, CvType.CV_8UC3, 255.0)
-        ghostFree.release()
+        post8 = track(Mat())
+        ghostFree?.let {
+            it.convertTo(post8, CvType.CV_8UC3, 255.0)
+            it.release(); ghostFree = null
+        }
 
         if (enableSmartNR) {
             Log.d("HdrProcessor", "Applying smart noise reduction")
-            post8 = smartNoiseReduction(post8)
+            val next = track(smartNoiseReduction(post8))
+            post8.release(); post8 = next
         }
         if (enableContrastSharpening) {
             Log.d("HdrProcessor", "Applying contrast limited sharpening")
-            post8 = contrastLimitedSharpening(post8)
+            val next = track(contrastLimitedSharpening(post8))
+            post8.release(); post8 = next
         }
         if (enableDehaze) {
             Log.d("HdrProcessor", "Applying dark channel prior dehazing")
-            post8 = darkChannelPriorDehaze(post8, DehazeConfig(
+            val next = track(darkChannelPriorDehaze(post8, DehazeConfig(
                 patchSize = dehazePatchSize, omega = dehazeOmega.toDouble()
-            ))
+            )))
+            post8.release(); post8 = next
         }
         if (superResolutionScale > 1) {
             Log.d("HdrProcessor", "Applying super resolution ${superResolutionScale}x")
             val srList = listOf(post8)
-            post8 = multiFrameSuperResolution(srList, SuperResConfig(scaleFactor = superResolutionScale))
+            val next = track(multiFrameSuperResolution(srList, SuperResConfig(scaleFactor = superResolutionScale)))
+            post8.release(); post8 = next
         }
         if (artisticEffect != "None") {
             Log.d("HdrProcessor", "Applying artistic effect: $artisticEffect")
@@ -314,22 +408,24 @@ actual suspend fun processHdr(
                 else -> null
             }
             if (effect != null) {
-                post8 = applyArtisticEffect(post8, ArtisticConfig(
+                val next = track(applyArtisticEffect(post8, ArtisticConfig(
                     effect = effect,
                     ortonBlurRadius = artisticOrtonBlurRadius,
                     ortonOpacity = artisticOrtonOpacity.toDouble(),
                     miniatureFocusY = artisticMiniatureFocusY.toDouble(),
                     miniatureBlurHeight = artisticMiniatureBlurHeight.toDouble(),
                     bokehRadius = artisticBokehRadius
-                ))
+                )))
+                post8.release(); post8 = next
             }
         }
 
-        val final8bit = post8
+        System.gc()
 
-        val resultBitmap = Bitmap.createBitmap(final8bit.cols(), final8bit.rows(), Bitmap.Config.ARGB_8888)
-        Utils.matToBitmap(final8bit, resultBitmap)
-        final8bit.release()
+        val finalMat = post8!!
+        val resultBitmap = Bitmap.createBitmap(finalMat.cols(), finalMat.rows(), Bitmap.Config.ARGB_8888)
+        Utils.matToBitmap(finalMat, resultBitmap)
+        finalMat.release(); post8 = null
 
         val savedPath = if (isPreview) {
             val previewFile = File(context.cacheDir, "hdr_preview_${System.currentTimeMillis()}.jpg")
@@ -342,12 +438,24 @@ actual suspend fun processHdr(
         }
         resultBitmap.recycle()
         Log.d("HdrProcessor", "HDR complete: $savedPath")
+        System.gc()
         savedPath
+    } catch (e: OutOfMemoryError) {
+        Log.e("HdrProcessor", "HDR processing OOM — releasing memory", e)
+        null
     } catch (e: Exception) {
         Log.e("HdrProcessor", "HDR processing failed", e)
         null
     } finally {
+        releaseAll()
         mats.forEach { it.release() }
+        resultMat?.release()
+        ghostFree?.release()
+        post8?.release()
+        hdrMat_debevec?.release()
+        rgb32f_debevec?.release()
+        response_debevec?.release()
+        System.gc()
     }
 }
 
@@ -645,7 +753,7 @@ private fun alignMTB(mats: List<Mat>): List<Mat> {
     return try {
         aligner.process(mats, aligned)
         if (aligned.none { it.empty() }) {
-            mats.forEach { it.release() }; aligned
+            aligned
         } else {
             aligned.forEach { it.release() }; mats
         }

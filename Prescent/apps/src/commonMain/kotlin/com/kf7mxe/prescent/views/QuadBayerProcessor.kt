@@ -12,7 +12,8 @@ data class QuadBayerOptions(
     val denoise: Boolean = true,
     val pipeToHdr: Boolean = false,
     val pipeToNightSight: Boolean = false,
-    val saveDng: Boolean = false
+    val saveDng: Boolean = false,
+    val smartSelection: Boolean = false
 )
 
 expect suspend fun processQuadBayer(

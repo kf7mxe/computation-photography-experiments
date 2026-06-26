@@ -4,6 +4,14 @@ import com.kf7mxe.prescent.FullscreenPage
 import com.kf7mxe.prescent.GlobalNavigator
 import com.kf7mxe.prescent.algorithmStore
 import com.kf7mxe.prescent.alignmentStore
+import com.kf7mxe.prescent.smartFrameSelectionStore
+import com.kf7mxe.prescent.hotPixelFixStore
+import com.kf7mxe.prescent.caCorrectionStore
+import com.kf7mxe.prescent.lensCorrectionStore
+import com.kf7mxe.prescent.smartNRStore
+import com.kf7mxe.prescent.contrastSharpeningStore
+import com.kf7mxe.prescent.jointDenoiseStore
+import com.kf7mxe.prescent.dehazeStore
 import com.lightningkite.kiteui.*
 import com.lightningkite.kiteui.models.*
 import com.lightningkite.kiteui.navigation.Page
@@ -104,6 +112,8 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
     val saveSuccess = Signal(false)
 
     private var previewJob: Job? = null
+    private val mountTrigger = Signal(0)
+    private var previewGuard = false
 
     private val algorithms = listOf("Hybrid", "Contrast Optimizer", "Durand", "CLAHE Boost", "Mertens", "Pyramid Fusion", "Guided Fusion", "Retinex", "Saliency Fusion", "Reinhard", "Drago", "Mantiuk", "Fattal", "iCam06")
 
@@ -126,6 +136,16 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
             load {
                 algorithmStore().takeIf { it.isNotBlank() }?.let { tonemapAlgorithm.value = it }
                 alignmentStore().takeIf { it.isNotBlank() }?.let { alignmentOption.value = it }
+                smartFrameSelection.value = smartFrameSelectionStore().toBoolean()
+                enableHotPixelFix.value = hotPixelFixStore().toBoolean()
+                enableCACorrection.value = caCorrectionStore().toBoolean()
+                enableLensCorrection.value = lensCorrectionStore().toBoolean()
+                enableSmartNR.value = smartNRStore().toBoolean()
+                enableContrastSharpening.value = contrastSharpeningStore().toBoolean()
+                enableJointDenoise.value = jointDenoiseStore().toBoolean()
+                enableDehaze.value = dehazeStore().toBoolean()
+                delay(200)
+                mountTrigger.value = 1
             }
 
             expanding.scrolling.col {
@@ -602,6 +622,26 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
             }
 
             reactive {
+                smartFrameSelection()
+                enableHotPixelFix()
+                enableCACorrection()
+                enableLensCorrection()
+                enableSmartNR()
+                enableContrastSharpening()
+                enableJointDenoise()
+                enableDehaze()
+
+                smartFrameSelectionStore.value = smartFrameSelection.value.toString()
+                hotPixelFixStore.value = enableHotPixelFix.value.toString()
+                caCorrectionStore.value = enableCACorrection.value.toString()
+                lensCorrectionStore.value = enableLensCorrection.value.toString()
+                smartNRStore.value = enableSmartNR.value.toString()
+                contrastSharpeningStore.value = enableContrastSharpening.value.toString()
+                jointDenoiseStore.value = enableJointDenoise.value.toString()
+                dehazeStore.value = enableDehaze.value.toString()
+            }
+
+            reactive {
                 tonemapAlgorithm()
                 alignmentOption()
                 contrastWeight()
@@ -646,6 +686,7 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
                 artisticMiniatureFocusY()
                 artisticMiniatureBlurHeight()
                 artisticBokehRadius()
+                mountTrigger()
 
                 previewJob?.cancel()
                 previewJob = launch {
@@ -662,6 +703,8 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
             processing.value = true
             saveSuccess.value = false
         } else {
+            if (previewGuard) return
+            previewGuard = true
             previewProcessing.value = true
         }
 
@@ -724,7 +767,7 @@ class HdrProcessingPage(val images: List<String> = listOf()) : Page, FullscreenP
             e.printStackTrace()
         } finally {
             if (fullSize) processing.value = false
-            else previewProcessing.value = false
+            else { previewProcessing.value = false; previewGuard = false }
         }
     }
 
