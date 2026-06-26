@@ -208,8 +208,18 @@ def create_stereo_360(color_path, depth_path, output_path,
     scene.render.image_settings.views_format = 'STEREO_3D'
     scene.render.image_settings.stereo_3d_format.display_mode = 'TOPBOTTOM'
     
-    scene.render.image_settings.file_format = 'JPEG'
-    scene.render.image_settings.quality = 95
+    # Determine output format from extension
+    ext = os.path.splitext(output_path)[1].lower()
+    if ext == '.png':
+        scene.render.image_settings.file_format = 'PNG'
+        scene.render.image_settings.color_depth = '8'
+        scene.render.image_settings.compression = 15
+    elif ext == '.webp':
+        scene.render.image_settings.file_format = 'WEBP'
+        scene.render.image_settings.quality = 95
+    else:  # Default to JPEG
+        scene.render.image_settings.file_format = 'JPEG'
+        scene.render.image_settings.quality = 95
     scene.render.filepath = output_path
 
     # 7. RENDER

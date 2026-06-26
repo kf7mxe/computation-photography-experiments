@@ -8,5 +8,10 @@
   "subdivisions": 3,
   "heal_seams": true,
   "model": "depth_anything",
-  "mode": "full"
+  "mode": "full",
+  "upscale_enabled": true,
+  "upscale_factor": "2x",
+  "upscale_model": "RealESRGAN_x4plus (General)",
+  "output_format": "JPEG (Smaller, lossy)",
+  "jpeg_quality": 95
 }

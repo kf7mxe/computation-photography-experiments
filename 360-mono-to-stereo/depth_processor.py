@@ -25,9 +25,11 @@ except ImportError:
     TRANSFORMERS_AVAILABLE = False
 
 
-def print_progress(message, step=None, total=None):
+def print_progress(message, step=None, total=None, percentage=None):
     """Print progress in a parseable format for the GUI."""
-    if step is not None and total is not None:
+    if percentage is not None:
+        print(f"[PERCENT] {percentage} - {message}", flush=True)
+    elif step is not None and total is not None:
         print(f"[PROGRESS] {step}/{total} - {message}", flush=True)
     else:
         print(f"[STATUS] {message}", flush=True)
@@ -156,7 +158,7 @@ def load_depth_anything_model():
         print("[ERROR] 'transformers' library is missing. Install with: pip install transformers", file=sys.stderr)
         sys.exit(1)
 
-    print_progress("Loading Depth Anything V2 model...")
+    print_progress("Loading Depth Anything V2 model...", percentage=2)
 
     device, dtype = get_device_info()
 
@@ -231,11 +233,11 @@ def process_batch(pipe, image_pil_list, cube_size, steps):
 
 def process_full_panorama(input_path, output_path, processor, model):
     """Process the full 360 panorama directly using Depth Anything."""
-    print_progress(f"Loading image for direct processing: {input_path}")
+    print_progress("Loading image...", percentage=5)
 
     image = Image.open(input_path).convert("RGB")
     original_size = image.size
-    print_progress(f"Original image size: {original_size[0]}x{original_size[1]}")
+    print_progress(f"Loaded {original_size[0]}x{original_size[1]} image", percentage=10)
 
     # Adaptive resizing based on available memory and image size
     # For very large panoramas (8K+), we need to be more aggressive
@@ -244,10 +246,10 @@ def process_full_panorama(input_path, output_path, processor, model):
 
     if total_pixels > 33_000_000:  # > 8K (7680x4320 = 33M pixels)
         max_dim = 1536
-        print_progress(f"Large panorama detected, using max dimension: {max_dim}")
+        print_progress(f"Large panorama: scaling to {max_dim}px", percentage=12)
     elif total_pixels > 8_000_000:  # > 4K
         max_dim = 2048
-        print_progress(f"4K+ panorama detected, using max dimension: {max_dim}")
+        print_progress(f"4K+ panorama: scaling to {max_dim}px", percentage=12)
     else:
         max_dim = 2560  # Allow higher resolution for smaller images
 
@@ -263,7 +265,7 @@ def process_full_panorama(input_path, output_path, processor, model):
 
         inference_size = (new_width, new_height)
         image = image.resize(inference_size, Image.Resampling.LANCZOS)
-        print_progress(f"Resized to {inference_size[0]}x{inference_size[1]} for inference")
+        print_progress(f"Resized to {inference_size[0]}x{inference_size[1]}", percentage=15)
 
     device = model.device
 
@@ -279,11 +281,14 @@ def process_full_panorama(input_path, output_path, processor, model):
     # Free the PIL image from memory
     del image
     gc.collect()
+    print_progress("Preprocessing complete", percentage=20)
 
-    print_progress("Running inference on full panorama...")
+    print_progress("Running AI depth inference...", percentage=25)
     with torch.no_grad():
         outputs = model(**inputs)
         predicted_depth = outputs.predicted_depth
+
+    print_progress("Inference complete", percentage=60)
 
     # Clear inputs immediately
     del inputs, outputs
@@ -292,7 +297,7 @@ def process_full_panorama(input_path, output_path, processor, model):
     gc.collect()
 
     # Interpolate to original size in chunks if very large
-    print_progress("Upscaling depth map to original resolution...")
+    print_progress("Upscaling depth map to original resolution...", percentage=65)
 
     if total_pixels > 33_000_000:  # Very large image - do two-step upscaling
         # First upscale to intermediate size
@@ -312,7 +317,7 @@ def process_full_panorama(input_path, output_path, processor, model):
         gc.collect()
 
         # Second upscale using CPU (to avoid GPU OOM)
-        print_progress("Final upscaling pass (CPU)...")
+        print_progress("Final upscaling pass (CPU)...", percentage=75)
         prediction_pil = Image.fromarray((prediction_cpu * 255).astype(np.uint8))
         prediction_pil = prediction_pil.resize(original_size, Image.Resampling.LANCZOS)
         output = np.array(prediction_pil).astype(np.float32) / 255.0
@@ -332,9 +337,10 @@ def process_full_panorama(input_path, output_path, processor, model):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()
+    print_progress("Upscaling complete", percentage=80)
 
     # Normalize to 0-255
-    print_progress("Normalizing depth values...")
+    print_progress("Normalizing depth values...", percentage=85)
     if output.max() > output.min():
         formatted = (output - output.min()) / (output.max() - output.min())
     else:
@@ -343,9 +349,10 @@ def process_full_panorama(input_path, output_path, processor, model):
     formatted = (formatted * 255).astype(np.uint8)
 
     # Save with quality setting
+    print_progress("Saving depth map...", percentage=90)
     final_img = Image.fromarray(formatted)
     final_img.save(output_path, quality=95, optimize=True)
-    print_progress(f"Depth map saved to: {output_path}")
+    print_progress(f"Depth map saved", percentage=95)
 
     # Final cleanup
     del output, formatted, final_img

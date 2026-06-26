@@ -219,31 +219,42 @@ class Stereo360Tool(QMainWindow):
         # Thread management
         self.depth_thread = None
         self.render_thread = None
+        self.upscale_thread = None
 
+        # Initialize paths before anything else
         self.input_path = None
+        self.output_dir = self.config.get('output_dir', os.path.expanduser('~/Pictures'))
+
+        # Initialize UI
+        self.init_ui()
+        self.apply_dark_theme()
 
     def __del__(self):
         """Destructor - ensure threads are cleaned up."""
-        try:
-            if hasattr(self, 'depth_thread') and self.depth_thread:
-                self.depth_thread.cancel()
-                self.depth_thread.wait(1000)
-                if self.depth_thread.isRunning():
-                    self.depth_thread.terminate()
-                    self.depth_thread.wait(500)
+        self._cleanup_all_threads()
 
-            if hasattr(self, 'render_thread') and self.render_thread:
-                self.render_thread.cancel()
-                self.render_thread.wait(1000)
-                if self.render_thread.isRunning():
-                    self.render_thread.terminate()
-                    self.render_thread.wait(500)
-        except:
-            pass  # Ignore errors during cleanup
-        self.output_dir = self.config.get('output_dir', os.path.expanduser('~/Pictures'))
-        
-        self.init_ui()
-        self.apply_dark_theme()
+    def _cleanup_all_threads(self):
+        """Clean up all running threads."""
+        threads = [
+            self.depth_thread if hasattr(self, 'depth_thread') else None,
+            self.render_thread if hasattr(self, 'render_thread') else None,
+            self.upscale_thread if hasattr(self, 'upscale_thread') else None,
+        ]
+
+        for thread in threads:
+            if thread and thread.isRunning():
+                try:
+                    # First, try to cancel gracefully
+                    thread.cancel()
+                    # Wait up to 3 seconds for graceful shutdown
+                    if not thread.wait(3000):
+                        # If still running, terminate forcefully
+                        thread.terminate()
+                        # Wait up to 1 second for termination
+                        thread.wait(1000)
+                except Exception as e:
+                    # If all else fails, just log and continue
+                    print(f"Warning: Failed to cleanup thread: {e}", file=sys.stderr)
     
     def load_config(self):
         """Load configuration from JSON file."""
@@ -267,7 +278,14 @@ class Stereo360Tool(QMainWindow):
         self.config['samples'] = self.samples_spin.value()
         self.config['subdivisions'] = self.subdivisions_spin.value()
         self.config['heal_seams'] = self.heal_seams_check.isChecked()
-        
+        # AI Upscaling settings
+        self.config['upscale_enabled'] = self.upscale_check.isChecked()
+        self.config['upscale_factor'] = self.upscale_factor_combo.currentText()
+        self.config['upscale_model'] = self.upscale_model_combo.currentText()
+        # Output format settings
+        self.config['output_format'] = self.output_format_combo.currentText()
+        self.config['jpeg_quality'] = self.jpeg_quality_spin.value()
+
         try:
             with open(self.config_path, 'w') as f:
                 json.dump(self.config, f, indent=2)
@@ -330,19 +348,39 @@ class Stereo360Tool(QMainWindow):
         # Output Section
         output_group = QGroupBox("💾 Output")
         output_layout = QFormLayout(output_group)
-        
+
         output_dir_layout = QHBoxLayout()
         self.output_dir_edit = QLineEdit(self.output_dir)
         self.output_dir_edit.setReadOnly(True)
         output_dir_layout.addWidget(self.output_dir_edit)
-        
+
         output_browse_btn = QPushButton("...")
         output_browse_btn.clicked.connect(self.browse_output_dir)
         output_browse_btn.setFixedWidth(40)
         output_dir_layout.addWidget(output_browse_btn)
         output_layout.addRow("Directory:", output_dir_layout)
-        
+
         left_layout.addWidget(output_group)
+
+        # Depth Preview Section
+        preview_group = QGroupBox("🔍 Depth Preview")
+        preview_layout = QVBoxLayout(preview_group)
+
+        self.depth_preview = ImagePreview("Generate depth map to preview")
+        self.depth_preview.setMaximumHeight(200)
+        preview_layout.addWidget(self.depth_preview)
+
+        preview_btn_layout = QHBoxLayout()
+        self.generate_depth_btn = QPushButton("📊 Generate Depth Only")
+        self.generate_depth_btn.clicked.connect(self.generate_depth_preview)
+        self.generate_depth_btn.setToolTip(
+            "Generate only the depth map without stereo rendering.\n"
+            "Use this to preview and adjust depth settings before full render."
+        )
+        preview_btn_layout.addWidget(self.generate_depth_btn)
+        preview_layout.addLayout(preview_btn_layout)
+
+        left_layout.addWidget(preview_group)
         
         splitter.addWidget(left_panel)
         
@@ -476,9 +514,130 @@ class Stereo360Tool(QMainWindow):
         self.subdivisions_spin.setToolTip("Geometry detail level")
         self.subdivisions_spin.valueChanged.connect(self.on_manual_change)
         render_layout.addRow("Subdivisions:", self.subdivisions_spin)
-        
+
+        # AI Upscaling section
+        upscale_group = QGroupBox("🔍 AI Upscaling (Post-Processing)")
+        upscale_layout = QFormLayout(upscale_group)
+
+        self.upscale_check = QCheckBox("Enable AI Upscaling")
+        self.upscale_check.setChecked(self.config.get('upscale_enabled', False))
+        self.upscale_check.setToolTip(
+            "Use Real-ESRGAN to upscale the final output.\n"
+            "Significantly improves quality for VR viewing.\n"
+            "Requires: pip install realesrgan"
+        )
+        upscale_layout.addRow(self.upscale_check)
+
+        self.upscale_factor_combo = QComboBox()
+        self.upscale_factor_combo.addItems(["2x", "4x"])
+        self.upscale_factor_combo.setCurrentText(self.config.get('upscale_factor', '2x'))
+        self.upscale_factor_combo.setToolTip(
+            "2x: Doubles resolution (faster, less RAM)\n"
+            "4x: Quadruples resolution (slower, more RAM)"
+        )
+        upscale_layout.addRow("Upscale Factor:", self.upscale_factor_combo)
+
+        self.upscale_model_combo = QComboBox()
+        self.upscale_model_combo.addItems([
+            "RealESRGAN_x4plus (General)",
+            "RealESRGAN_x4plus_anime (Anime/CG)",
+            "realesr-general-x4v3 (Fast)"
+        ])
+        self.upscale_model_combo.setCurrentText(self.config.get('upscale_model', 'RealESRGAN_x4plus (General)'))
+        self.upscale_model_combo.setToolTip(
+            "General: Best for photos and real-world images\n"
+            "Anime: Optimized for anime/CG content\n"
+            "Fast: Faster processing, slightly lower quality"
+        )
+        upscale_layout.addRow("Model:", self.upscale_model_combo)
+
+        render_layout.addRow(upscale_group)
+
+        # Output format section
+        format_group = QGroupBox("📄 Output Format")
+        format_layout = QFormLayout(format_group)
+
+        self.output_format_combo = QComboBox()
+        self.output_format_combo.addItems(["JPEG (Smaller, lossy)", "PNG (Larger, lossless)", "WebP (Best compression)"])
+        saved_format = self.config.get('output_format', 'JPEG (Smaller, lossy)')
+        self.output_format_combo.setCurrentText(saved_format)
+        self.output_format_combo.setToolTip(
+            "JPEG: Smaller files, good for sharing (default)\n"
+            "PNG: Lossless quality, larger files\n"
+            "WebP: Best compression, modern format"
+        )
+        format_layout.addRow("Format:", self.output_format_combo)
+
+        self.jpeg_quality_spin = QSpinBox()
+        self.jpeg_quality_spin.setRange(70, 100)
+        self.jpeg_quality_spin.setValue(self.config.get('jpeg_quality', 95))
+        self.jpeg_quality_spin.setSuffix("%")
+        self.jpeg_quality_spin.setToolTip("Quality for JPEG/WebP output (higher = better quality, larger file)")
+        format_layout.addRow("Quality:", self.jpeg_quality_spin)
+
+        render_layout.addRow(format_group)
+
         settings_tabs.addTab(render_tab, "🎬 Render")
-        
+
+        # === BATCH PROCESSING TAB ===
+        batch_tab = QWidget()
+        batch_layout = QVBoxLayout(batch_tab)
+
+        batch_group = QGroupBox("📦 Batch Processing")
+        batch_form = QVBoxLayout(batch_group)
+
+        batch_info = QLabel(
+            "<b>Process multiple images at once</b><br><br>"
+            "Add multiple 360° panoramas to the queue and process them sequentially. "
+            "All images will use the current settings."
+        )
+        batch_info.setWordWrap(True)
+        batch_info.setStyleSheet("color: #aaa; font-size: 11px; padding: 5px;")
+        batch_form.addWidget(batch_info)
+
+        # Batch file list
+        self.batch_list = QTextEdit()
+        self.batch_list.setPlaceholderText("Drag & drop images here or use 'Add Files' button...\nOne file path per line.")
+        self.batch_list.setMaximumHeight(120)
+        batch_form.addWidget(self.batch_list)
+
+        # Batch buttons
+        batch_btn_layout = QHBoxLayout()
+        self.batch_add_btn = QPushButton("➕ Add Files")
+        self.batch_add_btn.clicked.connect(self.batch_add_files)
+        batch_btn_layout.addWidget(self.batch_add_btn)
+
+        self.batch_clear_btn = QPushButton("🗑️ Clear")
+        self.batch_clear_btn.clicked.connect(lambda: self.batch_list.clear())
+        batch_btn_layout.addWidget(self.batch_clear_btn)
+
+        batch_btn_layout.addStretch()
+
+        self.batch_start_btn = QPushButton("🚀 Process All")
+        self.batch_start_btn.clicked.connect(self.start_batch_processing)
+        self.batch_start_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #218838; }
+        """)
+        batch_btn_layout.addWidget(self.batch_start_btn)
+
+        batch_form.addLayout(batch_btn_layout)
+        batch_layout.addWidget(batch_group)
+
+        # Batch progress
+        self.batch_progress_label = QLabel("Ready for batch processing")
+        self.batch_progress_label.setStyleSheet("color: #888; font-size: 11px;")
+        batch_layout.addWidget(self.batch_progress_label)
+
+        batch_layout.addStretch()
+        settings_tabs.addTab(batch_tab, "📦 Batch")
+
         right_layout.addWidget(settings_tabs)
         
         # Processing info
@@ -1111,10 +1270,11 @@ class Stereo360Tool(QMainWindow):
         # Save settings
         self.save_config()
 
-        # Prepare output paths
+        # Prepare output paths with selected format
         input_name = os.path.splitext(os.path.basename(self.input_path))[0]
+        ext = self.get_output_extension()
         self.depth_output = os.path.join(self.output_dir, f"{input_name}_depth.jpg")
-        self.stereo_output = os.path.join(self.output_dir, f"{input_name}_stereo_3d.jpg")
+        self.stereo_output = os.path.join(self.output_dir, f"{input_name}_stereo_3d{ext}")
         self._is_preview = False
 
         # Update UI
@@ -1176,8 +1336,21 @@ class Stereo360Tool(QMainWindow):
     
     def on_depth_output(self, line):
         """Handle output from depth generation."""
-        if line.startswith('[PROGRESS]'):
-            # Parse progress: [PROGRESS] 1/6 - Message
+        if line.startswith('[PERCENT]'):
+            # Parse progress: [PERCENT] 25 - Message
+            try:
+                parts = line.split(' - ', 1)
+                percent_str = parts[0].replace('[PERCENT] ', '')
+                depth_percent = int(percent_str)
+                # Depth is 50% of total pipeline, so scale 0-100 to 0-50
+                overall_percent = int(depth_percent * 0.5)
+                self.progress_bar.setValue(overall_percent)
+                message = parts[1] if len(parts) > 1 else ''
+                self.progress_bar.setFormat(f"Depth ({depth_percent}%): {message}")
+            except:
+                pass
+        elif line.startswith('[PROGRESS]'):
+            # Parse progress: [PROGRESS] 1/6 - Message (for cube mode)
             try:
                 parts = line.split(' - ', 1)
                 progress_part = parts[0].replace('[PROGRESS] ', '')
@@ -1199,11 +1372,23 @@ class Stereo360Tool(QMainWindow):
         """Handle depth generation completion."""
         if success and os.path.exists(self.depth_output):
             self.log(f"✅ Depth map generated: {self.depth_output}")
+
+            # Check if this was depth preview only
+            if hasattr(self, '_depth_preview_only') and self._depth_preview_only:
+                self.on_depth_preview_complete(True)
+                return
+
             self.progress_bar.setValue(50)
             self.progress_bar.setFormat("Starting stereo render...")
             self.run_stereo_render()
         else:
             self.log(f"❌ Depth generation failed: {message}")
+
+            # Check if this was depth preview only
+            if hasattr(self, '_depth_preview_only') and self._depth_preview_only:
+                self.on_depth_preview_complete(False)
+                return
+
             self.processing_complete(False)
     
     def run_stereo_render(self):
@@ -1267,17 +1452,139 @@ class Stereo360Tool(QMainWindow):
         """Handle render completion."""
         if success and os.path.exists(self.stereo_output):
             self.log(f"✅ Stereo render complete: {self.stereo_output}")
-            self.processing_complete(True)
+
+            # Check if AI upscaling is enabled
+            if self.upscale_check.isChecked():
+                self.run_upscaling()
+            else:
+                self.processing_complete(True)
         else:
             self.log(f"❌ Render failed: {message}")
             self.processing_complete(False)
+
+    def run_upscaling(self):
+        """Run AI upscaling on the rendered output."""
+        # Check if the image is too large before attempting upscaling
+        try:
+            from PIL import Image
+            import psutil
+
+            # Get image dimensions
+            img = Image.open(self.stereo_output)
+            w, h = img.size
+            img.close()
+
+            # Get upscaling settings
+            scale_text = self.upscale_factor_combo.currentText()
+            scale = int(scale_text.replace('x', ''))
+
+            # Check available memory
+            available_memory_gb = psutil.virtual_memory().available / (1024**3)
+            estimated_memory_gb = (w * h * 3 * scale * scale * 8) / (1024**3)
+            safe_memory_gb = available_memory_gb * 0.6
+
+            # Warn if image is very large
+            if estimated_memory_gb > safe_memory_gb:
+                self.log(f"⚠️ Warning: Upscaling this {w}x{h} image may crash the application")
+                self.log(f"   Estimated memory needed: {estimated_memory_gb:.1f} GB")
+                self.log(f"   Available safe memory: {safe_memory_gb:.1f} GB")
+                self.log(f"   Skipping upscaling to prevent crash")
+                self.log(f"   💡 Tip: Try using a smaller input image or disable upscaling")
+                self.processing_complete(True)
+                return
+
+        except Exception as e:
+            self.log(f"⚠️ Could not check memory requirements: {e}")
+            # Continue anyway if check fails
+
+        self.log("\n📍 Phase 3: AI Upscaling...")
+        self.progress_bar.setValue(85)
+        self.progress_bar.setFormat("AI Upscaling...")
+
+        # Get upscaling settings
+        scale_text = self.upscale_factor_combo.currentText()
+        scale = int(scale_text.replace('x', ''))
+
+        model_text = self.upscale_model_combo.currentText()
+        if 'anime' in model_text.lower():
+            model_name = 'RealESRGAN_x4plus_anime'
+        elif 'fast' in model_text.lower() or 'general' in model_text.lower():
+            model_name = 'realesr-general-x4v3'
+        else:
+            model_name = 'RealESRGAN_x4plus'
+
+        # Create output path for upscaled version
+        base, ext = os.path.splitext(self.stereo_output)
+        self.upscaled_output = f"{base}_upscaled_{scale}x{ext}"
+
+        upscale_script = os.path.join(self.script_dir, 'upscale_image.py')
+
+        args = [
+            self.stereo_output,
+            self.upscaled_output,
+            '--scale', str(scale),
+            '--model', model_name,
+            '--tile-size', '64'  # Very conservative tile size to prevent crashes
+        ]
+
+        self.upscale_thread = ProcessRunner(sys.executable, [upscale_script] + args, self.script_dir)
+        self.upscale_thread.output_received.connect(self.on_upscale_output)
+        self.upscale_thread.error_received.connect(lambda e: self.log(f"⚠️ {e}"))
+        self.upscale_thread.finished.connect(self.on_upscale_finished)
+        self.upscale_thread.start()
+
+    def on_upscale_output(self, line):
+        """Handle output from upscaling."""
+        if line.startswith('[STATUS]'):
+            message = line.replace('[STATUS] ', '')
+            self.log(f"   {message}")
+        elif '[ERROR]' in line:
+            self.log(f"❌ {line}")
+        else:
+            self.log(f"   {line}")
+
+    def on_upscale_finished(self, success, message):
+        """Handle upscaling completion."""
+        self.upscale_thread = None
+
+        if success and os.path.exists(self.upscaled_output):
+            self.log(f"✅ AI Upscaling complete: {self.upscaled_output}")
+            # Update stereo_output to point to the upscaled version
+            self.stereo_output = self.upscaled_output
+            self.processing_complete(True)
+        else:
+            self.log(f"⚠️ Upscaling failed, using original render: {message}")
+            # Continue with original output
+            self.processing_complete(True)
     
     def processing_complete(self, success):
         """Handle end of processing pipeline."""
         self.depth_thread = None
         self.render_thread = None
+        self.upscale_thread = None
+
+        # Check if we're in batch mode
+        if hasattr(self, '_is_batch_mode') and self._is_batch_mode:
+            if success:
+                self.log(f"   ✅ Complete: {os.path.basename(self.stereo_output)}")
+                # Also update depth preview with the generated depth map
+                if os.path.exists(self.depth_output):
+                    self.depth_preview.set_image(self.depth_output)
+            else:
+                self.log(f"   ❌ Failed: {os.path.basename(self.input_path)}")
+
+            # Move to next file in batch
+            self._batch_index += 1
+            # Calculate overall batch progress
+            batch_progress = int((self._batch_index / self._batch_total) * 100)
+            self.progress_bar.setValue(batch_progress)
+            self.progress_bar.setFormat(f"Batch: {self._batch_index}/{self._batch_total}")
+            self.process_next_batch_file()
+            return
+
         self.start_btn.setEnabled(True)
         self.preview_btn.setEnabled(True)
+        self.generate_depth_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
 
         # Cleanup preview if it was running
@@ -1296,6 +1603,10 @@ class Stereo360Tool(QMainWindow):
             self.log(f"   Stereo 3D image saved to: {self.stereo_output}")
             self.log("=" * 50)
 
+            # Update depth preview with generated depth map
+            if os.path.exists(self.depth_output):
+                self.depth_preview.set_image(self.depth_output)
+
             # Ask to open output
             reply = QMessageBox.question(
                 self,
@@ -1311,36 +1622,210 @@ class Stereo360Tool(QMainWindow):
             self.progress_bar.setValue(0)
             self.progress_bar.setFormat("Failed ❌")
 
+    def get_output_extension(self):
+        """Get the file extension based on selected output format."""
+        format_text = self.output_format_combo.currentText()
+        if 'PNG' in format_text:
+            return '.png'
+        elif 'WebP' in format_text:
+            return '.webp'
+        else:
+            return '.jpg'
+
+    def generate_depth_preview(self):
+        """Generate only depth map for preview without stereo render."""
+        if not self.input_path or not os.path.exists(self.input_path):
+            QMessageBox.warning(self, "Error", "Please select an input image first.")
+            return
+
+        # Prepare depth output path
+        input_name = os.path.splitext(os.path.basename(self.input_path))[0]
+        self.depth_output = os.path.join(self.output_dir, f"{input_name}_depth.jpg")
+        self._depth_preview_only = True
+
+        # Update UI
+        self.start_btn.setEnabled(False)
+        self.preview_btn.setEnabled(False)
+        self.generate_depth_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Generating depth preview...")
+
+        self.log("=" * 50)
+        self.log("🔍 Generating depth map preview...")
+        self.log(f"   Input: {self.input_path}")
+        self.log(f"   Output: {self.depth_output}")
+        self.log("=" * 50)
+
+        # Start depth processing only
+        self.run_depth_generation()
+
+    def on_depth_preview_complete(self, success):
+        """Handle completion of depth-only preview."""
+        self._depth_preview_only = False
+        self.start_btn.setEnabled(True)
+        self.preview_btn.setEnabled(True)
+        self.generate_depth_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+
+        if success and os.path.exists(self.depth_output):
+            self.depth_preview.set_image(self.depth_output)
+            self.log("✅ Depth preview generated!")
+            self.progress_bar.setValue(100)
+            self.progress_bar.setFormat("Depth preview complete!")
+        else:
+            self.progress_bar.setValue(0)
+            self.progress_bar.setFormat("Depth preview failed")
+
+    def batch_add_files(self):
+        """Add files to batch processing list."""
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select 360° Panorama Images",
+            os.path.expanduser("~"),
+            "Images (*.jpg *.jpeg *.png *.tif *.tiff);;All Files (*)"
+        )
+
+        if files:
+            current_text = self.batch_list.toPlainText().strip()
+            new_files = '\n'.join(files)
+            if current_text:
+                self.batch_list.setPlainText(current_text + '\n' + new_files)
+            else:
+                self.batch_list.setPlainText(new_files)
+            self.log(f"Added {len(files)} files to batch queue")
+
+    def start_batch_processing(self):
+        """Start processing all files in the batch queue."""
+        batch_text = self.batch_list.toPlainText().strip()
+        if not batch_text:
+            QMessageBox.warning(self, "Error", "No files in batch queue. Add files first.")
+            return
+
+        # Parse file list
+        self._batch_files = [f.strip() for f in batch_text.split('\n') if f.strip() and os.path.exists(f.strip())]
+
+        if not self._batch_files:
+            QMessageBox.warning(self, "Error", "No valid files found in batch queue.")
+            return
+
+        # Validate all files exist
+        missing = [f for f in batch_text.split('\n') if f.strip() and not os.path.exists(f.strip())]
+        if missing:
+            QMessageBox.warning(self, "Warning", f"Some files not found:\n{chr(10).join(missing[:5])}")
+
+        self._batch_index = 0
+        self._batch_total = len(self._batch_files)
+        self._is_batch_mode = True
+
+        self.log("=" * 50)
+        self.log(f"📦 BATCH PROCESSING: {self._batch_total} files")
+        self.log("=" * 50)
+
+        # Disable batch controls
+        self.batch_add_btn.setEnabled(False)
+        self.batch_clear_btn.setEnabled(False)
+        self.batch_start_btn.setEnabled(False)
+        self.start_btn.setEnabled(False)
+        self.preview_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+
+        # Start processing first file
+        self.process_next_batch_file()
+
+    def process_next_batch_file(self):
+        """Process the next file in the batch queue."""
+        if self._batch_index >= self._batch_total:
+            self.batch_processing_complete()
+            return
+
+        current_file = self._batch_files[self._batch_index]
+        self.input_path = current_file
+        self.input_path_edit.setText(current_file)
+        self.input_preview.set_image(current_file)
+
+        self.batch_progress_label.setText(f"Processing {self._batch_index + 1}/{self._batch_total}: {os.path.basename(current_file)}")
+
+        # Prepare output paths with selected format
+        input_name = os.path.splitext(os.path.basename(current_file))[0]
+        ext = self.get_output_extension()
+        self.depth_output = os.path.join(self.output_dir, f"{input_name}_depth.jpg")
+        self.stereo_output = os.path.join(self.output_dir, f"{input_name}_stereo_3d{ext}")
+
+        self.log(f"\n[{self._batch_index + 1}/{self._batch_total}] Processing: {os.path.basename(current_file)}")
+
+        # Start depth processing
+        self.run_depth_generation()
+
+    def batch_processing_complete(self):
+        """Handle completion of all batch files."""
+        self._is_batch_mode = False
+        self.batch_add_btn.setEnabled(True)
+        self.batch_clear_btn.setEnabled(True)
+        self.batch_start_btn.setEnabled(True)
+        self.start_btn.setEnabled(True)
+        self.preview_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+
+        self.batch_progress_label.setText(f"Batch complete: {self._batch_total} files processed")
+        self.progress_bar.setValue(100)
+        self.progress_bar.setFormat("Batch complete! ✅")
+
+        self.log("\n" + "=" * 50)
+        self.log(f"🎉 BATCH PROCESSING COMPLETE!")
+        self.log(f"   Processed {self._batch_total} files")
+        self.log(f"   Output directory: {self.output_dir}")
+        self.log("=" * 50)
+
+        QMessageBox.information(
+            self,
+            "Batch Complete",
+            f"Successfully processed {self._batch_total} files.\n\nOutput saved to:\n{self.output_dir}"
+        )
+
     def cancel_process(self):
         """Cancel the current running process."""
         self.log("\n⚠️ Cancelling process...")
 
-        # Cancel and wait for depth thread
-        if self.depth_thread:
-            self.depth_thread.cancel()
-            self.depth_thread.wait(2000)  # Wait up to 2 seconds
-            if self.depth_thread.isRunning():
-                self.log("Force terminating depth process...")
-                self.depth_thread.terminate()
-                self.depth_thread.wait(1000)
-            self.depth_thread = None
+        # Cancel and wait for all threads
+        threads_to_cancel = [
+            ("depth", self.depth_thread),
+            ("render", self.render_thread),
+            ("upscale", self.upscale_thread),
+        ]
 
-        # Cancel and wait for render thread
-        if self.render_thread:
-            self.render_thread.cancel()
-            self.render_thread.wait(2000)  # Wait up to 2 seconds
-            if self.render_thread.isRunning():
-                self.log("Force terminating render process...")
-                self.render_thread.terminate()
-                self.render_thread.wait(1000)
-            self.render_thread = None
+        for name, thread in threads_to_cancel:
+            if thread:
+                thread.cancel()
+                thread.wait(2000)  # Wait up to 2 seconds
+                if thread.isRunning():
+                    self.log(f"Force terminating {name} process...")
+                    thread.terminate()
+                    thread.wait(1000)
+
+        self.depth_thread = None
+        self.render_thread = None
+        self.upscale_thread = None
 
         # Cleanup preview if it was running
         if hasattr(self, '_is_preview') and self._is_preview:
             self._cleanup_preview()
 
+        # Cleanup batch mode if it was running
+        if hasattr(self, '_is_batch_mode') and self._is_batch_mode:
+            self._is_batch_mode = False
+            self.batch_add_btn.setEnabled(True)
+            self.batch_clear_btn.setEnabled(True)
+            self.batch_start_btn.setEnabled(True)
+            self.batch_progress_label.setText("Batch cancelled")
+
+        # Cleanup depth preview mode
+        if hasattr(self, '_depth_preview_only') and self._depth_preview_only:
+            self._depth_preview_only = False
+
         self.start_btn.setEnabled(True)
         self.preview_btn.setEnabled(True)
+        self.generate_depth_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Cancelled")
@@ -1348,7 +1833,7 @@ class Stereo360Tool(QMainWindow):
     
     def closeEvent(self, event):
         """Handle window close."""
-        if self.depth_thread or self.render_thread:
+        if self.depth_thread or self.render_thread or self.upscale_thread:
             reply = QMessageBox.question(
                 self,
                 "Process Running",
@@ -1360,22 +1845,24 @@ class Stereo360Tool(QMainWindow):
                 event.ignore()
                 return
 
-            # Cancel and wait for threads to finish
-            if self.depth_thread:
-                self.depth_thread.cancel()
-                self.depth_thread.wait(2000)  # Wait up to 2 seconds
-                if self.depth_thread.isRunning():
-                    self.depth_thread.terminate()  # Force terminate if needed
-                    self.depth_thread.wait(1000)  # Wait for termination
-                self.depth_thread = None
+            # Cancel and wait for all threads to finish
+            threads_to_cancel = [
+                self.depth_thread,
+                self.render_thread,
+                self.upscale_thread,
+            ]
 
-            if self.render_thread:
-                self.render_thread.cancel()
-                self.render_thread.wait(2000)  # Wait up to 2 seconds
-                if self.render_thread.isRunning():
-                    self.render_thread.terminate()  # Force terminate if needed
-                    self.render_thread.wait(1000)  # Wait for termination
-                self.render_thread = None
+            for thread in threads_to_cancel:
+                if thread:
+                    thread.cancel()
+                    thread.wait(2000)  # Wait up to 2 seconds
+                    if thread.isRunning():
+                        thread.terminate()  # Force terminate if needed
+                        thread.wait(1000)  # Wait for termination
+
+            self.depth_thread = None
+            self.render_thread = None
+            self.upscale_thread = None
 
         self.save_config()
         event.accept()

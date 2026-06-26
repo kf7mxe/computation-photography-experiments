@@ -1,11 +1,11 @@
 {
   "output_dir": "/home/trax/Pictures",
-  "model": "depth-anything-v2-large",
+  "model": "depth-anything-v2-small",
   "steps": 10,
   "smooth": 1,
-  "displacement": 0.2,
+  "displacement": 0.4699999999999999,
   "ipd": 0.065,
   "samples": 32,
-  "subdivisions": 2,
+  "subdivisions": 1,
   "mode": "TOPBOTTOM"
 }

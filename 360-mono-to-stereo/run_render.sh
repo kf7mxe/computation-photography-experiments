@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ============================================
 BLENDER_CMD="blender"
 # BLENDER_CMD="/path/to/blender/blender"
-# ============================================
+# ============================================PyQt5
 
 # Run Blender in background mode with the render script
 "$BLENDER_CMD" -b -P "$SCRIPT_DIR/render_stereo.py" -- "$@"
